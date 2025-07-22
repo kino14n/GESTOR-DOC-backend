@@ -5,3 +5,4 @@ flask-cors
 PyMuPDF
 pytesseract
 pdf2image
+gunicorn>=20.0.0
