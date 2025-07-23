@@ -43,7 +43,7 @@ def listar_documentos():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM documentos")
+            cursor.execute("SELECT * FROM documents")
             resultado = cursor.fetchall()
         return jsonify(resultado)
     except Exception as e:
