@@ -6,10 +6,10 @@ documentos_bp = Blueprint('documentos_bp', __name__)
 
 def get_db_connection():
     return pymysql.connect(
-        host=os.environ.get('MYSQLHOST'),        # mysql.railway.internal o tu host MySQL
-        user=os.environ.get('MYSQLUSER'),        # root u otro usuario
-        password=os.environ.get('MYSQLPASSWORD'),# contraseña
-        database=os.environ.get('MYSQL_DATABASE'),# nombre base de datos
+        host=os.environ.get('MYSQLHOST'),        # Nombre exacto de variable en Railway
+        user=os.environ.get('MYSQLUSER'),
+        password=os.environ.get('MYSQLPASSWORD'),
+        database=os.environ.get('MYSQL_DATABASE'),
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True
     )
@@ -43,7 +43,6 @@ def importar_sql():
         if conn:
             conn.close()
 
-# Ruta para listar documentos (opcional)
 @documentos_bp.route('/api/documentos', methods=['GET'])
 def listar_documentos():
     conn = get_db_connection()
