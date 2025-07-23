@@ -53,3 +53,24 @@ def listar_documentos():
         return jsonify(result)
     finally:
         conn.close()
+
+        from flask import jsonify
+import os
+
+@documentos_bp.route('/api/env', methods=['GET'])
+def mostrar_env():
+    vars_esperadas = [
+        'MYSQLHOST', 'MYSQLUSER', 'MYSQLPASSWORD', 'MYSQL_DATABASE', 'MYSQLPORT', 'MYSQL_URL'
+    ]
+    env_vars = {var: os.environ.get(var) for var in vars_esperadas}
+    return jsonify(env_vars)
+
+    @documentos_bp.route('/api/ping', methods=['GET'])
+def ping():
+    try:
+        conn = get_db_connection()
+        conn.close()
+        return jsonify({"message": "pong", "db": "conexión exitosa"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
