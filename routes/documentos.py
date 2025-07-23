@@ -1,6 +1,6 @@
-from flask import Blueprint, request, jsonify
 import os
 import pymysql
+from flask import Blueprint, request, jsonify
 
 documentos_bp = Blueprint('documentos', __name__)
 
