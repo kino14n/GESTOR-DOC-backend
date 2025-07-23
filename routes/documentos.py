@@ -1,61 +1,55 @@
 from flask import Blueprint, request, jsonify
-import pymysql
 import os
+import pymysql
 
-documentos_bp = Blueprint('documentos_bp', __name__)
+documentos_bp = Blueprint('documentos', __name__)
 
 def get_db_connection():
-    return pymysql.connect(
-        host=os.environ.get('MYSQLHOST'),        # Nombre exacto de variable en Railway
-        user=os.environ.get('MYSQLUSER'),
-        password=os.environ.get('MYSQLPASSWORD'),
-        database=os.environ.get('MYSQL_DATABASE'),
+    connection = pymysql.connect(
+        host=os.getenv('MYSQLHOST'),
+        user=os.getenv('MYSQLUSER'),
+        password=os.getenv('MYSQLPASSWORD'),
+        db=os.getenv('MYSQL_DATABASE'),
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True
     )
+    return connection
 
 @documentos_bp.route('/api/documentos/importar_sql', methods=['POST'])
 def importar_sql():
     if 'file' not in request.files:
-        return jsonify({"error": "Archivo no enviado"}), 400
+        return jsonify({'error': 'No se ha enviado ningún archivo'}), 400
 
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "Archivo sin nombre"}), 400
+    archivo = request.files['file']
+    if archivo.filename == '':
+        return jsonify({'error': 'No se ha seleccionado ningún archivo'}), 400
 
+    contenido = archivo.read().decode('utf-8')
+    sentencias = [s.strip() for s in contenido.split(';') if s.strip()]
+
+    connection = get_db_connection()
     try:
-        sql_script = file.read().decode('utf-8')
+        with connection.cursor() as cursor:
+            for sentencia in sentencias:
+                cursor.execute(sentencia)
+        return jsonify({'mensaje': 'SQL importado exitosamente'})
     except Exception as e:
-        return jsonify({"error": f"Error al leer archivo: {str(e)}"}), 400
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            for statement in sql_script.split(';'):
-                stmt = statement.strip()
-                if stmt:
-                    cursor.execute(stmt)
-        return jsonify({"message": "Archivo SQL importado correctamente"})
-    except Exception as e:
-        return jsonify({"error": f"Error ejecutando script SQL: {str(e)}"}), 500
+        return jsonify({'error': str(e)}), 500
     finally:
-        if conn:
-            conn.close()
+        connection.close()
 
 @documentos_bp.route('/api/documentos', methods=['GET'])
 def listar_documentos():
-    conn = get_db_connection()
+    connection = get_db_connection()
     try:
-        with conn.cursor() as cursor:
+        with connection.cursor() as cursor:
             cursor.execute("SELECT * FROM documentos")
-            result = cursor.fetchall()
-        return jsonify(result)
+            resultado = cursor.fetchall()
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     finally:
-        conn.close()
-
-        from flask import jsonify
-import os
+        connection.close()
 
 @documentos_bp.route('/api/env', methods=['GET'])
 def mostrar_env():
@@ -68,9 +62,8 @@ def mostrar_env():
 @documentos_bp.route('/api/ping', methods=['GET'])
 def ping():
     try:
-        conn = get_db_connection()  # Esto debe ir con 4 espacios de indentación
-        conn.close()                # Igual aquí, 4 espacios
+        connection = get_db_connection()
+        connection.close()
         return jsonify({"message": "pong", "db": "conexión exitosa"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
