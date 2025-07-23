@@ -65,11 +65,11 @@ def mostrar_env():
     env_vars = {var: os.environ.get(var) for var in vars_esperadas}
     return jsonify(env_vars)
 
-    @documentos_bp.route('/api/ping', methods=['GET'])
+@documentos_bp.route('/api/ping', methods=['GET'])
 def ping():
     try:
-        conn = get_db_connection()
-        conn.close()
+        conn = get_db_connection()  # Esto debe ir con 4 espacios de indentación
+        conn.close()                # Igual aquí, 4 espacios
         return jsonify({"message": "pong", "db": "conexión exitosa"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
