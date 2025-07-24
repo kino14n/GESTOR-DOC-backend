@@ -44,13 +44,24 @@ def importar_sql():
     finally:
         connection.close()
 
-# Listar documentos
+# Listar documentos con sus códigos asociados correctamente
 @documentos_bp.route('/api/documentos', methods=['GET'])
 def listar_documentos():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM documents")
+            cursor.execute("""
+                SELECT 
+                    d.id,
+                    d.name,
+                    d.date,
+                    d.path,
+                    GROUP_CONCAT(c.code ORDER BY c.code SEPARATOR ', ') AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                GROUP BY d.id
+                ORDER BY d.id DESC
+            """)
             resultado = cursor.fetchall()
         return jsonify(resultado)
     except Exception as e:
@@ -79,17 +90,28 @@ def upload_document():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
+            # 1. Insertar documento
             cursor.execute("""
-                INSERT INTO documents (name, date, path, codigos_extraidos)
-                VALUES (%s, %s, %s, %s)
-            """, (name, date, filename, codigos))
+                INSERT INTO documents (name, date, path)
+                VALUES (%s, %s, %s)
+            """, (name, date, filename))
+            document_id = cursor.lastrowid
+
+            # 2. Insertar códigos en la tabla codes
+            if codigos:
+                lista_codigos = [c.strip() for c in codigos.replace('\n', ',').replace(';', ',').split(',') if c.strip()]
+                for code in lista_codigos:
+                    cursor.execute(
+                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)", 
+                        (document_id, code)
+                    )
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
         connection.close()
 
-# Editar documento
+# Editar documento y códigos
 @documentos_bp.route('/api/documentos/<int:doc_id>', methods=['PUT'])
 def editar_documento(doc_id):
     data = request.form or request.json or {}
@@ -101,15 +123,26 @@ def editar_documento(doc_id):
     try:
         with connection.cursor() as cursor:
             cursor.execute("""
-                UPDATE documents SET name=%s, date=%s, codigos_extraidos=%s WHERE id=%s
-            """, (name, date, codigos, doc_id))
+                UPDATE documents SET name=%s, date=%s WHERE id=%s
+            """, (name, date, doc_id))
+            # Actualizar códigos
+            if codigos is not None:
+                # Borrar códigos antiguos
+                cursor.execute("DELETE FROM codes WHERE document_id=%s", (doc_id,))
+                # Insertar nuevos códigos
+                lista_codigos = [c.strip() for c in codigos.replace('\n', ',').replace(';', ',').split(',') if c.strip()]
+                for code in lista_codigos:
+                    cursor.execute(
+                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)", 
+                        (doc_id, code)
+                    )
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
         connection.close()
 
-# Búsqueda inteligente voraz
+# Búsqueda inteligente voraz (busca en codes y nombre)
 @documentos_bp.route('/api/documentos/search', methods=['POST'])
 def busqueda_voraz():
     data = request.get_json()
@@ -117,7 +150,6 @@ def busqueda_voraz():
     if not texto:
         return jsonify([])
 
-    # Separar por espacios, saltos de línea, comas, etc.
     codigos = [c.strip().upper() for c in texto.replace(',', ' ').replace('\n', ' ').split() if c.strip()]
     if not codigos:
         return jsonify([])
@@ -125,7 +157,25 @@ def busqueda_voraz():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            query = "SELECT * FROM documents WHERE " + " OR ".join(['codigos_extraidos LIKE %s OR name LIKE %s OR path LIKE %s'] * len(codigos))
+            # Busqueda voraz en códigos y nombre
+            query = """
+                SELECT 
+                    d.id,
+                    d.name,
+                    d.date,
+                    d.path,
+                    GROUP_CONCAT(c.code ORDER BY c.code SEPARATOR ', ') AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                WHERE 
+                    {}
+                GROUP BY d.id
+                ORDER BY d.id DESC
+            """.format(
+                " OR ".join(
+                    ["c.code LIKE %s OR d.name LIKE %s OR d.path LIKE %s"] * len(codigos)
+                )
+            )
             params = []
             for cod in codigos:
                 like = f"%{cod}%"
@@ -138,7 +188,7 @@ def busqueda_voraz():
     finally:
         connection.close()
 
-# Buscar por código exacto
+# Buscar por código exacto (en tabla codes)
 @documentos_bp.route('/api/documentos/search_by_code', methods=['POST'])
 def buscar_por_codigo():
     data = request.get_json()
@@ -150,8 +200,17 @@ def buscar_por_codigo():
     try:
         with connection.cursor() as cursor:
             query = """
-                SELECT * FROM documents
-                WHERE codigos_extraidos LIKE %s
+                SELECT 
+                    d.id,
+                    d.name,
+                    d.date,
+                    d.path,
+                    GROUP_CONCAT(c.code ORDER BY c.code SEPARATOR ', ') AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                WHERE c.code LIKE %s
+                GROUP BY d.id
+                ORDER BY d.id DESC
             """
             like = f"%{codigo}%"
             cursor.execute(query, (like,))
