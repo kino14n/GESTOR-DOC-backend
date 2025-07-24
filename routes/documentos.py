@@ -189,37 +189,82 @@ def busqueda_voraz():
         connection.close()
 
 # Buscar por código exacto (en tabla codes)
-@documentos_bp.route('/api/documentos/search_by_code', methods=['POST'])
-def buscar_por_codigo():
+
+
+@documentos_bp.route('/api/documentos/search_optima', methods=['POST'])
+def busqueda_optima():
     data = request.get_json()
-    codigo = data.get('codigo', '').strip()
-    if not codigo:
-        return jsonify([])
+    texto = data.get('codigos', '').strip()
+    if not texto:
+        return jsonify({'error': 'No se proporcionaron códigos'}), 400
+
+    # Normaliza/captura los códigos
+    codigos = [c.strip().upper() for c in texto.replace(',', ' ').replace('\n', ' ').split() if c.strip()]
+    codigos = list(set(codigos))  # quita duplicados
+    cantidad = len(codigos)
+    if cantidad == 0:
+        return jsonify({'error': 'No se detectaron códigos válidos'}), 400
+
+    formato = ','.join(['%s'] * cantidad)
 
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            query = """
-                SELECT 
-                    d.id,
-                    d.name,
-                    d.date,
-                    d.path,
-                    GROUP_CONCAT(c.code ORDER BY c.code SEPARATOR ', ') AS codigos_extraidos
+            # 1. Buscar en qué documentos están los códigos buscados
+            cursor.execute(f"""
+                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_encontrados,
+                    COUNT(DISTINCT c.code) AS encontrados
                 FROM documents d
-                LEFT JOIN codes c ON c.document_id = d.id
-                WHERE c.code LIKE %s
+                JOIN codes c ON c.document_id = d.id
+                WHERE c.code IN ({formato})
                 GROUP BY d.id
-                ORDER BY d.id DESC
-            """
-            like = f"%{codigo}%"
-            cursor.execute(query, (like,))
-            resultado = cursor.fetchall()
-        return jsonify(resultado)
+                HAVING encontrados = %s
+                ORDER BY d.date DESC
+                LIMIT 1
+            """, codigos + [cantidad])
+            docs = cursor.fetchall()
+
+            if docs:
+                # Si hay un documento que tiene todos los códigos, devuélvelo
+                return jsonify({
+                    "tipo": "exito",
+                    "mensaje": "Documento que contiene todos los códigos buscados.",
+                    "documentos": docs,
+                    "codigos_faltantes": []
+                })
+            else:
+                # Si no hay, buscar qué códigos no existen en ningún documento
+                cursor.execute(f"""
+                    SELECT DISTINCT code FROM codes WHERE code IN ({formato})
+                """, codigos)
+                encontrados = [r['code'].upper() for r in cursor.fetchall()]
+                faltantes = [c for c in codigos if c not in encontrados]
+
+                # (Opcional) Traer los documentos que cubren la mayor cantidad de códigos posible
+                cursor.execute(f"""
+                    SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_encontrados,
+                        COUNT(DISTINCT c.code) AS encontrados
+                    FROM documents d
+                    JOIN codes c ON c.document_id = d.id
+                    WHERE c.code IN ({formato})
+                    GROUP BY d.id
+                    ORDER BY encontrados DESC, d.date DESC
+                    LIMIT 3
+                """, codigos)
+                docs_parciales = cursor.fetchall()
+
+                return jsonify({
+                    "tipo": "parcial",
+                    "mensaje": "Ningún documento contiene todos los códigos buscados.",
+                    "documentos": docs_parciales,
+                    "codigos_faltantes": faltantes
+                })
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
         connection.close()
+
 
 # Mostrar variables de entorno
 @documentos_bp.route('/api/env', methods=['GET'])
