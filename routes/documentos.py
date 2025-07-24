@@ -56,7 +56,7 @@ def listar_documentos():
                     d.name,
                     d.date,
                     d.path,
-                    GROUP_CONCAT(c.code ORDER BY c.code SEPARATOR ', ') AS codigos_extraidos
+                    GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
                 FROM documents d
                 LEFT JOIN codes c ON c.document_id = d.id
                 GROUP BY d.id
@@ -99,7 +99,7 @@ def upload_document():
 
             # 2. Insertar códigos en la tabla codes
             if codigos:
-                lista_codigos = [c.strip() for c in codigos.replace('\n', ',').replace(';', ',').split(',') if c.strip()]
+                lista_codigos = [c.strip().upper() for c in codigos.replace('\n', ',').replace(';', ',').split(',') if c.strip()]
                 for code in lista_codigos:
                     cursor.execute(
                         "INSERT INTO codes (document_id, code) VALUES (%s, %s)", 
@@ -127,10 +127,8 @@ def editar_documento(doc_id):
             """, (name, date, doc_id))
             # Actualizar códigos
             if codigos is not None:
-                # Borrar códigos antiguos
                 cursor.execute("DELETE FROM codes WHERE document_id=%s", (doc_id,))
-                # Insertar nuevos códigos
-                lista_codigos = [c.strip() for c in codigos.replace('\n', ',').replace(';', ',').split(',') if c.strip()]
+                lista_codigos = [c.strip().upper() for c in codigos.replace('\n', ',').replace(';', ',').split(',') if c.strip()]
                 for code in lista_codigos:
                     cursor.execute(
                         "INSERT INTO codes (document_id, code) VALUES (%s, %s)", 
@@ -142,7 +140,7 @@ def editar_documento(doc_id):
     finally:
         connection.close()
 
-# Búsqueda inteligente voraz (busca en codes y nombre)
+# Búsqueda voraz agrupada
 @documentos_bp.route('/api/documentos/search', methods=['POST'])
 def busqueda_voraz():
     data = request.get_json()
@@ -154,33 +152,18 @@ def busqueda_voraz():
     if not codigos:
         return jsonify([])
 
+    formato = ','.join(['%s'] * len(codigos))
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # Busqueda voraz en códigos y nombre
-            query = """
-                SELECT 
-                    d.id,
-                    d.name,
-                    d.date,
-                    d.path,
-                    GROUP_CONCAT(c.code ORDER BY c.code SEPARATOR ', ') AS codigos_extraidos
+            cursor.execute(f"""
+                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
                 FROM documents d
                 LEFT JOIN codes c ON c.document_id = d.id
-                WHERE 
-                    {}
+                WHERE c.code IN ({formato})
                 GROUP BY d.id
                 ORDER BY d.id DESC
-            """.format(
-                " OR ".join(
-                    ["c.code LIKE %s OR d.name LIKE %s OR d.path LIKE %s"] * len(codigos)
-                )
-            )
-            params = []
-            for cod in codigos:
-                like = f"%{cod}%"
-                params.extend([like, like, like])
-            cursor.execute(query, params)
+            """, codigos)
             resultado = cursor.fetchall()
         return jsonify(resultado)
     except Exception as e:
@@ -189,8 +172,34 @@ def busqueda_voraz():
         connection.close()
 
 # Buscar por código exacto (en tabla codes)
+@documentos_bp.route('/api/documentos/search_by_code', methods=['POST'])
+def buscar_por_codigo():
+    data = request.get_json()
+    codigo = data.get('codigo', '').strip()
+    if not codigo:
+        return jsonify([])
 
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            query = """
+                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                WHERE c.code LIKE %s
+                GROUP BY d.id
+                ORDER BY d.id DESC
+            """
+            like = f"%{codigo}%"
+            cursor.execute(query, (like,))
+            resultado = cursor.fetchall()
+        return jsonify(resultado)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        connection.close()
 
+# Búsqueda óptima (set cover voraz: menor número de documentos que cubren todos los códigos)
 @documentos_bp.route('/api/documentos/search_optima', methods=['POST'])
 def busqueda_optima():
     data = request.get_json()
@@ -198,73 +207,60 @@ def busqueda_optima():
     if not texto:
         return jsonify({'error': 'No se proporcionaron códigos'}), 400
 
-    # Normaliza/captura los códigos
     codigos = [c.strip().upper() for c in texto.replace(',', ' ').replace('\n', ' ').split() if c.strip()]
-    codigos = list(set(codigos))  # quita duplicados
-    cantidad = len(codigos)
-    if cantidad == 0:
+    codigos = list(set(codigos))
+    if not codigos:
         return jsonify({'error': 'No se detectaron códigos válidos'}), 400
 
-    formato = ','.join(['%s'] * cantidad)
-
+    formato = ','.join(['%s'] * len(codigos))
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # 1. Buscar en qué documentos están los códigos buscados
+            # 1. Traer todos los documentos que tengan al menos uno de los códigos
             cursor.execute(f"""
-                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_encontrados,
-                    COUNT(DISTINCT c.code) AS encontrados
+                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_encontrados
                 FROM documents d
                 JOIN codes c ON c.document_id = d.id
                 WHERE c.code IN ({formato})
                 GROUP BY d.id
-                HAVING encontrados = %s
                 ORDER BY d.date DESC
-                LIMIT 1
-            """, codigos + [cantidad])
+            """, codigos)
             docs = cursor.fetchall()
 
-            if docs:
-                # Si hay un documento que tiene todos los códigos, devuélvelo
-                return jsonify({
-                    "tipo": "exito",
-                    "mensaje": "Documento que contiene todos los códigos buscados.",
-                    "documentos": docs,
-                    "codigos_faltantes": []
-                })
-            else:
-                # Si no hay, buscar qué códigos no existen en ningún documento
-                cursor.execute(f"""
-                    SELECT DISTINCT code FROM codes WHERE code IN ({formato})
-                """, codigos)
-                encontrados = [r['code'].upper() for r in cursor.fetchall()]
-                faltantes = [c for c in codigos if c not in encontrados]
+        # 2. Armamos sets por documento
+        docs_sets = []
+        for doc in docs:
+            codes_set = set([c.strip().upper() for c in (doc['codigos_encontrados'] or '').split(',') if c.strip()])
+            docs_sets.append({
+                "doc": doc,
+                "codes": codes_set
+            })
 
-                # (Opcional) Traer los documentos que cubren la mayor cantidad de códigos posible
-                cursor.execute(f"""
-                    SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_encontrados,
-                        COUNT(DISTINCT c.code) AS encontrados
-                    FROM documents d
-                    JOIN codes c ON c.document_id = d.id
-                    WHERE c.code IN ({formato})
-                    GROUP BY d.id
-                    ORDER BY encontrados DESC, d.date DESC
-                    LIMIT 3
-                """, codigos)
-                docs_parciales = cursor.fetchall()
+        codigos_faltantes = set(codigos)
+        docs_seleccionados = []
+        while codigos_faltantes and docs_sets:
+            # Elige el doc que cubre la mayor cantidad de códigos faltantes, más reciente primero
+            docs_sets.sort(key=lambda d: len(d['codes'] & codigos_faltantes), reverse=True)
+            mejor_doc = docs_sets.pop(0)
+            cubiertos = mejor_doc['codes'] & codigos_faltantes
+            if not cubiertos:
+                break
+            docs_seleccionados.append({
+                "documento": mejor_doc['doc'],
+                "codigos_cubre": list(cubiertos)
+            })
+            codigos_faltantes -= cubiertos
 
-                return jsonify({
-                    "tipo": "parcial",
-                    "mensaje": "Ningún documento contiene todos los códigos buscados.",
-                    "documentos": docs_parciales,
-                    "codigos_faltantes": faltantes
-                })
+        resultado = {
+            "documentos": docs_seleccionados,
+            "codigos_faltantes": list(codigos_faltantes)
+        }
+        return jsonify(resultado)
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
         connection.close()
-
 
 # Mostrar variables de entorno
 @documentos_bp.route('/api/env', methods=['GET'])
