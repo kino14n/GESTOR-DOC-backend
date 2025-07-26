@@ -15,8 +15,9 @@ def get_db_connection():
         user=os.getenv('MYSQLUSER'),
         password=os.getenv('MYSQLPASSWORD'),
         db=os.getenv('MYSQL_DATABASE'),
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True
+        charset='utf8mb4', 
+        cursorclass=pymysql.cursors.DictCursor, 
+        autocommit=True 
     )
     return connection
 
@@ -69,6 +70,35 @@ def listar_documentos():
     finally:
         connection.close()
 
+# Obtener un solo documento por ID (Método GET)
+@documentos_bp.route('/api/documentos/<int:doc_id>', methods=['GET'])
+def obtener_documento(doc_id):
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT 
+                    d.id,
+                    d.name,
+                    d.date,
+                    d.path,
+                    GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                WHERE d.id = %s
+                GROUP BY d.id
+            """, (doc_id,))
+            resultado = cursor.fetchone() 
+            if resultado:
+                return jsonify(resultado)
+            else:
+                return jsonify({'error': 'Documento no encontrado'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        connection.close()
+
+
 # Subir documento
 @documentos_bp.route('/api/documentos/upload', methods=['POST'])
 def upload_document():
@@ -111,7 +141,7 @@ def upload_document():
     finally:
         connection.close()
 
-# Editar documento y códigos
+# Editar documento y códigos (Método PUT)
 @documentos_bp.route('/api/documentos/<int:doc_id>', methods=['PUT'])
 def editar_documento(doc_id):
     data = request.form or request.json or {}
@@ -137,6 +167,34 @@ def editar_documento(doc_id):
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    finally:
+        connection.close()
+
+# Eliminar documento (Método DELETE)
+@documentos_bp.route('/api/documentos/<int:doc_id>', methods=['DELETE'])
+def eliminar_documento(doc_id):
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            # Primero, obtener la ruta del PDF para eliminar el archivo físico
+            cursor.execute("SELECT path FROM documents WHERE id = %s", (doc_id,))
+            doc_path = cursor.fetchone()
+            if doc_path and doc_path['path']:
+                file_path = os.path.join(UPLOAD_FOLDER, doc_path['path'])
+                if os.path.exists(file_path):
+                    os.remove(file_path) 
+                    print(f"Archivo eliminado: {file_path}") 
+                else:
+                    print(f"Advertencia: Archivo no encontrado en {file_path}") 
+
+            # Luego, eliminar registros de la base de datos (códigos y luego documento)
+            cursor.execute("DELETE FROM codes WHERE document_id = %s", (doc_id,))
+            cursor.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
+        
+        return jsonify({'ok': True, 'message': 'Documento eliminado correctamente'})
+    except Exception as e:
+        print(f"Error al eliminar documento {doc_id}: {e}") 
+        return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         connection.close()
 
@@ -171,7 +229,7 @@ def busqueda_voraz():
     finally:
         connection.close()
 
-# Buscar por código exacto (en tabla codes)
+# Buscar por código exacto (solo devuelve los códigos coincidentes)
 @documentos_bp.route('/api/documentos/search_by_code', methods=['POST'])
 def buscar_por_codigo():
     data = request.get_json()
@@ -182,18 +240,18 @@ def buscar_por_codigo():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
+            # Seleccionar solo los códigos distintivos que comiencen con el patrón
             query = """
-                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
-                FROM documents d
-                LEFT JOIN codes c ON c.document_id = d.id
+                SELECT DISTINCT c.code 
+                FROM codes c
                 WHERE c.code LIKE %s
-                GROUP BY d.id
-                ORDER BY d.id DESC
+                ORDER BY c.code ASC
+                LIMIT 100 
             """
-            like = f"%{codigo}%"
+            like = f"{codigo}%" 
             cursor.execute(query, (like,))
-            resultado = cursor.fetchall()
-        return jsonify(resultado)
+            resultado = [row['code'] for row in cursor.fetchall()] 
+        return jsonify(resultado) 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
@@ -220,7 +278,7 @@ def busqueda_optima():
             cursor.execute(f"""
                 SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_encontrados
                 FROM documents d
-                JOIN codes c ON c.document_id = d.id
+                JOIN codes c ON c.document_id = d.id 
                 WHERE c.code IN ({formato})
                 GROUP BY d.id
                 ORDER BY d.date DESC
