@@ -1,7 +1,7 @@
 import os
 import pymysql
-from flask import Blueprint, request, jsonify
-from werkzeug.utils import secure_filename
+import requests # <--- Import añadido
+from flask import Blueprint, request, jsonify, Response, current_app # <--- Imports añadidos
 
 documentos_bp = Blueprint('documentos', __name__)
 
@@ -15,9 +15,9 @@ def get_db_connection():
         user=os.getenv('MYSQLUSER'),
         password=os.getenv('MYSQLPASSWORD'),
         db=os.getenv('MYSQL_DATABASE'),
-        charset='utf8mb4', 
-        cursorclass=pymysql.cursors.DictCursor, 
-        autocommit=True 
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True
     )
     return connection
 
@@ -52,7 +52,7 @@ def listar_documentos():
     try:
         with connection.cursor() as cursor:
             cursor.execute("""
-                SELECT 
+                SELECT
                     d.id,
                     d.name,
                     d.date,
@@ -77,7 +77,7 @@ def obtener_documento(doc_id):
     try:
         with connection.cursor() as cursor:
             cursor.execute("""
-                SELECT 
+                SELECT
                     d.id,
                     d.name,
                     d.date,
@@ -88,7 +88,7 @@ def obtener_documento(doc_id):
                 WHERE d.id = %s
                 GROUP BY d.id
             """, (doc_id,))
-            resultado = cursor.fetchone() 
+            resultado = cursor.fetchone()
             if resultado:
                 return jsonify(resultado)
             else:
@@ -102,6 +102,7 @@ def obtener_documento(doc_id):
 # Subir documento
 @documentos_bp.route('/api/documentos/upload', methods=['POST'])
 def upload_document():
+    # Tu código original para subir documentos se mantiene intacto...
     if 'file' not in request.files:
         return jsonify({'error': 'No se envió el archivo PDF'}), 400
 
@@ -132,7 +133,7 @@ def upload_document():
                 lista_codigos = [c.strip().upper() for c in codigos.replace('\n', ',').replace(';', ',').split(',') if c.strip()]
                 for code in lista_codigos:
                     cursor.execute(
-                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)", 
+                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)",
                         (document_id, code)
                     )
         return jsonify({'ok': True})
@@ -144,6 +145,7 @@ def upload_document():
 # Editar documento y códigos (Método PUT)
 @documentos_bp.route('/api/documentos/<int:doc_id>', methods=['PUT'])
 def editar_documento(doc_id):
+    # Tu código original para editar documentos se mantiene intacto...
     data = request.form or request.json or {}
     name = data.get('nombre') or data.get('name')
     date = data.get('fecha') or data.get('date')
@@ -161,7 +163,7 @@ def editar_documento(doc_id):
                 lista_codigos = [c.strip().upper() for c in codigos.replace('\n', ',').replace(';', ',').split(',') if c.strip()]
                 for code in lista_codigos:
                     cursor.execute(
-                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)", 
+                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)",
                         (doc_id, code)
                     )
         return jsonify({'ok': True})
@@ -173,27 +175,26 @@ def editar_documento(doc_id):
 # Eliminar documento (Método DELETE)
 @documentos_bp.route('/api/documentos/<int:doc_id>', methods=['DELETE'])
 def eliminar_documento(doc_id):
+    # Tu código original para eliminar documentos se mantiene intacto...
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # Primero, obtener la ruta del PDF para eliminar el archivo físico
             cursor.execute("SELECT path FROM documents WHERE id = %s", (doc_id,))
             doc_path = cursor.fetchone()
             if doc_path and doc_path['path']:
                 file_path = os.path.join(UPLOAD_FOLDER, doc_path['path'])
                 if os.path.exists(file_path):
-                    os.remove(file_path) 
-                    print(f"Archivo eliminado: {file_path}") 
+                    os.remove(file_path)
+                    print(f"Archivo eliminado: {file_path}")
                 else:
-                    print(f"Advertencia: Archivo no encontrado en {file_path}") 
+                    print(f"Advertencia: Archivo no encontrado en {file_path}")
 
-            # Luego, eliminar registros de la base de datos (códigos y luego documento)
             cursor.execute("DELETE FROM codes WHERE document_id = %s", (doc_id,))
             cursor.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
-        
+
         return jsonify({'ok': True, 'message': 'Documento eliminado correctamente'})
     except Exception as e:
-        print(f"Error al eliminar documento {doc_id}: {e}") 
+        print(f"Error al eliminar documento {doc_id}: {e}")
         return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         connection.close()
@@ -201,6 +202,7 @@ def eliminar_documento(doc_id):
 # Búsqueda voraz agrupada
 @documentos_bp.route('/api/documentos/search', methods=['POST'])
 def busqueda_voraz():
+    # Tu código original para búsqueda se mantiene intacto...
     data = request.get_json()
     texto = data.get('texto', '').strip()
     if not texto:
@@ -232,6 +234,7 @@ def busqueda_voraz():
 # Buscar por código exacto (solo devuelve los códigos coincidentes)
 @documentos_bp.route('/api/documentos/search_by_code', methods=['POST'])
 def buscar_por_codigo():
+    # Tu código original de autocompletado se mantiene intacto...
     data = request.get_json()
     codigo = data.get('codigo', '').strip()
     if not codigo:
@@ -240,18 +243,17 @@ def buscar_por_codigo():
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            # Seleccionar solo los códigos distintivos que comiencen con el patrón
             query = """
-                SELECT DISTINCT c.code 
+                SELECT DISTINCT c.code
                 FROM codes c
                 WHERE c.code LIKE %s
                 ORDER BY c.code ASC
-                LIMIT 100 
+                LIMIT 100
             """
-            like = f"{codigo}%" 
+            like = f"{codigo}%"
             cursor.execute(query, (like,))
-            resultado = [row['code'] for row in cursor.fetchall()] 
-        return jsonify(resultado) 
+            resultado = [row['code'] for row in cursor.fetchall()]
+        return jsonify(resultado)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
@@ -260,6 +262,7 @@ def buscar_por_codigo():
 # Búsqueda óptima (set cover voraz: menor número de documentos que cubren todos los códigos)
 @documentos_bp.route('/api/documentos/search_optima', methods=['POST'])
 def busqueda_optima():
+    # Tu código original de búsqueda óptima se mantiene intacto...
     data = request.get_json()
     texto = data.get('codigos', '').strip()
     if not texto:
@@ -278,7 +281,7 @@ def busqueda_optima():
             cursor.execute(f"""
                 SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_encontrados
                 FROM documents d
-                JOIN codes c ON c.document_id = d.id 
+                JOIN codes c ON c.document_id = d.id
                 WHERE c.code IN ({formato})
                 GROUP BY d.id
                 ORDER BY d.date DESC
@@ -297,7 +300,6 @@ def busqueda_optima():
         codigos_faltantes = set(codigos)
         docs_seleccionados = []
         while codigos_faltantes and docs_sets:
-            # Elige el doc que cubre la mayor cantidad de códigos faltantes, más reciente primero
             docs_sets.sort(key=lambda d: len(d['codes'] & codigos_faltantes), reverse=True)
             mejor_doc = docs_sets.pop(0)
             cubiertos = mejor_doc['codes'] & codigos_faltantes
@@ -323,6 +325,7 @@ def busqueda_optima():
 # Mostrar variables de entorno
 @documentos_bp.route('/api/env', methods=['GET'])
 def mostrar_env():
+    # Tu código original de /env se mantiene intacto...
     vars_esperadas = [
         'MYSQLHOST', 'MYSQLUSER', 'MYSQLPASSWORD', 'MYSQL_DATABASE', 'MYSQLPORT', 'MYSQL_URL'
     ]
@@ -332,9 +335,73 @@ def mostrar_env():
 # Ping
 @documentos_bp.route('/api/ping', methods=['GET'])
 def ping():
+    # Tu código original de /ping se mantiene intacto...
     try:
         connection = get_db_connection()
         connection.close()
         return jsonify({"message": "pong", "db": "conexión exitosa"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ==============================================================================
+# ===== NUEVA RUTA PARA INTEGRACIÓN CON EL SERVICIO DE RESALTADO (APP 2) =====
+# ==============================================================================
+@documentos_bp.route('/api/documentos/resaltar', methods=['POST'])
+def resaltar_documento_proxy():
+    """
+    Actúa como intermediario (proxy) para el servicio de resaltado.
+    Recibe la petición del frontend, llama a la App2, y devuelve la respuesta.
+    """
+    data = request.get_json()
+    pdf_path_original = data.get('pdf_path')
+    codes_to_highlight = data.get('codes')
+
+    if not pdf_path_original or not codes_to_highlight:
+        return jsonify({'error': 'Faltan el path del PDF o los códigos para resaltar'}), 400
+
+    # URL del servicio de resaltado (App2) usando la red interna de Railway.
+    # Esta es la URL que me proporcionaste.
+    resaltador_url = "http://pdf-resaltador-new.railway.internal/api/resaltar"
+
+    # Se utiliza la variable global UPLOAD_FOLDER definida al inicio de este archivo.
+    file_full_path = os.path.join(UPLOAD_FOLDER, pdf_path_original)
+
+    if not os.path.exists(file_full_path):
+        return jsonify({'error': f'El archivo {pdf_path_original} no se encuentra en el servidor'}), 404
+
+    try:
+        with open(file_full_path, 'rb') as f:
+            from werkzeug.utils import secure_filename
+            files_to_send = {'pdf_file': (secure_filename(pdf_path_original), f, 'application/pdf')}
+            payload = {'codes': ','.join(codes_to_highlight)}
+
+            # App1 llama a App2. El timeout es importante para procesos largos como el OCR.
+            response_from_resaltador = requests.post(resaltador_url, files=files_to_send, data=payload, stream=True, timeout=180)
+
+            # Si App2 devuelve un error (ej: 404 código no encontrado), lo propagamos al frontend
+            response_from_resaltador.raise_for_status()
+
+        # Preparamos una respuesta que transmite el PDF de App2 al navegador del usuario
+        return Response(
+            response_from_resaltador.iter_content(chunk_size=8192),
+            content_type=response_from_resaltador.headers.get('Content-Type')
+        )
+
+    except requests.exceptions.HTTPError as e:
+        # Captura errores específicos de App2 y los devuelve de forma clara
+        try:
+            error_json = e.response.json()
+            error_message = error_json.get('error', 'Error desconocido en el servicio de resaltado')
+        except ValueError:
+            error_message = 'El servicio de resaltado devolvió una respuesta inesperada.'
+        return jsonify({'error': error_message}), e.response.status_code
+
+    except requests.exceptions.RequestException as e:
+        # Error de conexión entre App1 y App2
+        return jsonify({'error': f"No se pudo conectar con el servicio de resaltado: {e}"}), 502
+
+    except Exception as e:
+        # Cualquier otro error inesperado en el proceso
+        # Usar current_app.logger es una buena práctica si configuras logging en tu app principal
+        print(f"Error inesperado en el proxy de resaltado: {e}")
+        return jsonify({'error': f"Ocurrió un error inesperado en el servidor."}), 500
