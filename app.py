@@ -34,4 +34,3 @@ def test_db():
             "status": "error",
             "message": str(e)
         }), 500
-
