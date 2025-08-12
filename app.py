@@ -1,190 +1,395 @@
-# app.py — GESTOR-DOC Backend (Flask + Railway)
+# routes/documentos.py — GESTOR-DOC
 import os
-import requests
-from flask import Flask, request, jsonify, Response, make_response
-from flask_cors import CORS
-from werkzeug.middleware.proxy_fix import ProxyFix
+import pymysql
+from flask import Blueprint, request, jsonify
+from werkzeug.utils import secure_filename
 
-# Blueprints
-try:
-    from routes.documentos import documentos_bp  # si está en routes/
-except ImportError:
-    from documentos import documentos_bp  # fallback si está en raíz
+documentos_bp = Blueprint("documentos", __name__)
 
-import db
+# Carpeta de uploads (relativa al working dir en Railway)
+UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# -------------------- DB helpers --------------------
+def _env(name, fallback=""):
+    """
+    Lee primero variables DB_* y luego las de Railway (MYSQL*).
+    Ej: DB_HOST o MYSQLHOST.
+    """
+    mapping = {
+        "DB_HOST": "MYSQLHOST",
+        "DB_PORT": "MYSQLPORT",
+        "DB_USER": "MYSQLUSER",
+        "DB_PASS": "MYSQLPASSWORD",
+        "DB_NAME": "MYSQLDATABASE",  # OJO: Railway usa MYSQLDATABASE (sin guion bajo)
+    }
+    return os.getenv(name) or os.getenv(mapping.get(name, ""), fallback)
 
-# ----------------------------- Utils -----------------------------
-def _parse_origins(env_value: str):
-    """Convierte CORS_ORIGINS (separado por coma) en lista."""
-    if not env_value:
-        return []
-    return [o.strip() for o in env_value.split(",") if o.strip()]
-
-
-def _origin_allowed(origin: str, allowed: list[str]) -> bool:
-    if not origin:
-        return False
-    if not allowed or "*" in allowed:
-        return True
-    return origin in allowed
-
-
-# --------------------------- App Factory --------------------------
-def create_app() -> Flask:
-    app = Flask(__name__)
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
-
-    # ----- CORS -----
-    # Orígenes por defecto (producción y local dev)
-    default_origins = [
-        "https://kino14n.github.io",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
-    allowed_origins = _parse_origins(
-        os.getenv("CORS_ORIGINS", ",".join(default_origins))
+def get_db_connection():
+    return pymysql.connect(
+        host=_env("DB_HOST", "127.0.0.1"),
+        port=int(_env("DB_PORT", "3306") or "3306"),
+        user=_env("DB_USER"),
+        password=_env("DB_PASS"),
+        database=os.getenv("MYSQL_DATABASE") or _env("DB_NAME"),  # soporta ambos nombres
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
     )
 
-    # CORS automático para /api/* y /resaltar
-    CORS(
-        app,
-        resources={
-            r"/api/*": {
-                "origins": allowed_origins or ["*"],
-                "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-                "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
-                "supports_credentials": False,
-            },
-            r"/resaltar": {
-                "origins": allowed_origins or ["*"],
-                "methods": ["POST", "OPTIONS"],
-                "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
-                "supports_credentials": False,
-            },
-        },
-        expose_headers=["Content-Disposition"],
-    )
+# ==================== RUTAS ====================
 
-    # Preflight universal para evitar fallos de OPTIONS si el deploy está frío
-    @app.before_request
-    def _handle_preflight():
-        if request.method == "OPTIONS":
-            origin = request.headers.get("Origin")
-            resp = make_response("", 204)
-            if _origin_allowed(origin, allowed_origins):
-                resp.headers["Access-Control-Allow-Origin"] = origin
-                resp.headers["Vary"] = "Origin"
-                resp.headers["Access-Control-Allow-Methods"] = (
-                    "GET,POST,PUT,DELETE,OPTIONS"
-                )
-                req_headers = request.headers.get(
-                    "Access-Control-Request-Headers", "Content-Type,Authorization"
-                )
-                resp.headers["Access-Control-Allow-Headers"] = req_headers
-                resp.headers["Access-Control-Max-Age"] = "86400"
-            return resp
+# Importar SQL (archivo .sql) — POST /api/documentos/importar_sql
+@documentos_bp.route("/importar_sql", methods=["POST"])
+def importar_sql():
+    if "file" not in request.files:
+        return jsonify({"error": "No se ha enviado ningún archivo"}), 400
+    archivo = request.files["file"]
+    if not archivo.filename:
+        return jsonify({"error": "No se ha seleccionado ningún archivo"}), 400
 
-    # Añade cabeceras CORS/Expose para todas las respuestas válidas
-    @app.after_request
-    def _add_cors_headers(resp):
-        origin = request.headers.get("Origin")
-        if _origin_allowed(origin, allowed_origins):
-            resp.headers["Access-Control-Allow-Origin"] = origin
-            resp.headers["Vary"] = "Origin"
-            # Para descargas (CSV/ZIP/PDF) desde el front
-            resp.headers["Access-Control-Expose-Headers"] = "Content-Disposition"
-        return resp
+    contenido = archivo.read().decode("utf-8", errors="ignore")
+    sentencias = [s.strip() for s in contenido.split(";") if s.strip()]
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            for s in sentencias:
+                cur.execute(s)
+        return jsonify({"mensaje": "SQL importado exitosamente"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
-    # ----- Blueprints -----
-    app.register_blueprint(documentos_bp, url_prefix="/api/documentos")
+# Listar documentos con sus códigos — GET /api/documentos
+@documentos_bp.route("", methods=["GET"])
+@documentos_bp.route("/", methods=["GET"])
+def listar_documentos():
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 
+                    d.id,
+                    d.name,
+                    d.date,
+                    d.path,
+                    GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                GROUP BY d.id
+                ORDER BY d.id DESC
+                """
+            )
+            rows = cur.fetchall()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
-    # ----- Endpoints utilitarios -----
-    @app.get("/")
-    def root():
-        return jsonify({"service": "gestor-doc-backend", "ok": True})
+# Obtener un documento — GET /api/documentos/<id>
+@documentos_bp.route("/<int:doc_id>", methods=["GET"])
+def obtener_documento(doc_id):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 
+                    d.id,
+                    d.name,
+                    d.date,
+                    d.path,
+                    GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                WHERE d.id = %s
+                GROUP BY d.id
+                """,
+                (doc_id,),
+            )
+            row = cur.fetchone()
+        if row:
+            return jsonify(row)
+        return jsonify({"error": "Documento no encontrado"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
-    @app.get("/api/ping")
-    def ping():
+# Subir documento (multipart/form-data) — POST /api/documentos/upload
+@documentos_bp.route("/upload", methods=["POST"])
+def upload_document():
+    if "file" not in request.files:
+        return jsonify({"error": "No se envió el archivo PDF"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "Archivo sin nombre"}), 400
+
+    filename = secure_filename(f.filename)
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    f.save(file_path)
+
+    name = request.form.get("nombre") or request.form.get("name")
+    date = request.form.get("fecha") or request.form.get("date")
+    codigos = request.form.get("codigos") or request.form.get("codigos_extraidos")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO documents (name, date, path) VALUES (%s, %s, %s)",
+                (name, date, filename),
+            )
+            document_id = cur.lastrowid
+
+            if codigos:
+                lista = [
+                    c.strip().upper()
+                    for c in codigos.replace("\n", ",").replace(";", ",").split(",")
+                    if c.strip()
+                ]
+                for code in lista:
+                    cur.execute(
+                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)",
+                        (document_id, code),
+                    )
+        return jsonify({"ok": True, "id": document_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+# Editar documento — PUT /api/documentos/<id>
+@documentos_bp.route("/<int:doc_id>", methods=["PUT"])
+def editar_documento(doc_id):
+    data = request.form or request.json or {}
+    name = data.get("nombre") or data.get("name")
+    date = data.get("fecha") or data.get("date")
+    codigos = data.get("codigos") or data.get("codigos_extraidos")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE documents SET name=%s, date=%s WHERE id=%s", (name, date, doc_id))
+            if codigos is not None:
+                cur.execute("DELETE FROM codes WHERE document_id=%s", (doc_id,))
+                lista = [
+                    c.strip().upper()
+                    for c in codigos.replace("\n", ",").replace(";", ",").split(",")
+                    if c.strip()
+                ]
+                for code in lista:
+                    cur.execute(
+                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)",
+                        (doc_id, code),
+                    )
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
-    @app.get("/api/env")
-    def env_info():
-        """Diagnóstico (NO expongas en producción si no es necesario)."""
-        data = {
-            "DB_HOST": os.getenv("DB_HOST", os.getenv("MYSQLHOST", "")),
-            "DB_PORT": os.getenv("DB_PORT", os.getenv("MYSQLPORT", "")),
-            "DB_NAME": os.getenv("DB_NAME", os.getenv("MYSQLDATABASE", "")),
-            "DB_USER": os.getenv("DB_USER", os.getenv("MYSQLUSER", "")),
-            "CORS_ORIGINS": allowed_origins or ["*"],
-            "HIGHLIGHTER_URL": os.getenv("HIGHLIGHTER_URL", ""),
+# Eliminar documento — DELETE /api/documentos/<id>
+@documentos_bp.route("/<int:doc_id>", methods=["DELETE"])
+def eliminar_documento(doc_id):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT path FROM documents WHERE id=%s", (doc_id,))
+            row = cur.fetchone()
+            if row and row.get("path"):
+                fp = os.path.join(UPLOAD_FOLDER, row["path"])
+                if os.path.exists(fp):
+                    try:
+                        os.remove(fp)
+                    except Exception:
+                        pass  # FS efímero en Railway; si falla, no bloquea
+
+            cur.execute("DELETE FROM codes WHERE document_id=%s", (doc_id,))
+            cur.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
+        return jsonify({"ok": True, "message": "Documento eliminado correctamente"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    finally:
+        conn.close()
+
+# Búsqueda por texto (agrupada) — POST /api/documentos/search
+@documentos_bp.route("/search", methods=["POST"])
+def busqueda_voraz():
+    data = request.get_json(silent=True) or {}
+    texto = (data.get("texto") or "").strip()
+    if not texto:
+        return jsonify([])
+
+    codigos = [
+        c.strip().upper()
+        for c in texto.replace(",", " ").replace("\n", " ").split()
+        if c.strip()
+    ]
+    if not codigos:
+        return jsonify([])
+
+    fmt = ",".join(["%s"] * len(codigos))
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                WHERE c.code IN ({fmt})
+                GROUP BY d.id
+                ORDER BY d.id DESC
+                """,
+                codigos,
+            )
+            rows = cur.fetchall()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+# Buscar por código — POST /api/documentos/search_by_code
+# Body: { codigo: "...", modo?: "prefijo"|"exacto" }
+@documentos_bp.route("/search_by_code", methods=["POST"])
+def buscar_por_codigo():
+    data = request.get_json(silent=True) or {}
+    codigo = (data.get("codigo") or "").strip().upper()
+    modo = (data.get("modo") or "like").lower()
+
+    if not codigo:
+        return jsonify([])
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            if modo in ("prefijo", "prefix"):
+                cur.execute(
+                    """
+                    SELECT DISTINCT c.code
+                    FROM codes c
+                    WHERE UPPER(c.code) LIKE %s
+                    ORDER BY c.code
+                    LIMIT 50
+                    """,
+                    (codigo + "%",),
+                )
+                return jsonify([r["code"] for r in cur.fetchall()])
+
+            # like (contiene) o exacto
+            if modo == "exacto":
+                where = "UPPER(c.code) = %s"
+                val = (codigo,)
+            else:
+                where = "UPPER(c.code) LIKE %s"
+                val = ("%" + codigo + "%",)
+
+            cur.execute(
+                f"""
+                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
+                FROM documents d
+                LEFT JOIN codes c ON c.document_id = d.id
+                WHERE {where}
+                GROUP BY d.id
+                ORDER BY d.id DESC
+                """,
+                val,
+            )
+            rows = cur.fetchall()
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+# Búsqueda óptima (set cover voraz) — POST /api/documentos/search_optima
+@documentos_bp.route("/search_optima", methods=["POST"])
+def busqueda_optima():
+    data = request.get_json(silent=True) or {}
+    texto = (data.get("codigos") or data.get("texto") or "").strip()
+    if not texto:
+        return jsonify({"error": "No se proporcionaron códigos"}), 400
+
+    pedidos = list(
+        {c.strip().upper() for c in texto.replace(",", " ").replace("\n", " ").split() if c.strip()}
+    )
+    if not pedidos:
+        return jsonify({"error": "No se detectaron códigos válidos"}), 400
+
+    fmt = ",".join(["%s"] * len(pedidos))
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT d.*, GROUP_CONCAT(DISTINCT UPPER(c.code)) AS codigos_encontrados
+                FROM documents d
+                JOIN codes c ON c.document_id = d.id
+                WHERE UPPER(c.code) IN ({fmt})
+                GROUP BY d.id
+                ORDER BY d.date DESC
+                """,
+                pedidos,
+            )
+            docs = cur.fetchall()
+    finally:
+        conn.close()
+
+    # Armar conjuntos por documento
+    docs_sets = []
+    for d in docs:
+        codes_set = {
+            x.strip().upper()
+            for x in (d.get("codigos_encontrados") or "").split(",")
+            if x.strip()
         }
-        return jsonify(data)
+        docs_sets.append({"doc": d, "codes": codes_set})
 
-    @app.get("/api/routes")
-    def routes():
-        return jsonify({"routes": [str(r) for r in app.url_map.iter_rules()]})
+    faltantes = set(pedidos)
+    seleccionados = []
+    while faltantes and docs_sets:
+        docs_sets.sort(key=lambda d: len(d["codes"] & faltantes), reverse=True)
+        best = docs_sets.pop(0)
+        cubre = best["codes"] & faltantes
+        if not cubre:
+            break
+        seleccionados.append({"documento": best["doc"], "codigos_cubre": sorted(list(cubre))})
+        faltantes -= cubre
 
-    @app.get("/api/test-db")
-    def test_db():
-        try:
-            conn = db.get_conn()
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS total FROM documentos")
-                row = cur.fetchone()
-                total = row["total"] if isinstance(row, dict) else row[0]
-            return jsonify({"status": "ok", "total_documentos": int(total)})
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify(
+        {"documentos": seleccionados, "codigos_faltantes": sorted(list(faltantes))}
+    )
 
-    # ----- Proxy de resaltado de PDF -----
-    @app.post("/resaltar")
-    def resaltar_proxy():
-        highlighter = os.getenv("HIGHLIGHTER_URL")
-        if not highlighter:
-            return jsonify({"error": "HIGHLIGHTER_URL no está configurada"}), 400
+# Info env dentro del blueprint — GET /api/documentos/env (opcional)
+@documentos_bp.route("/env", methods=["GET"])
+def mostrar_env():
+    vars_esperadas = [
+        "MYSQLHOST",
+        "MYSQLUSER",
+        "MYSQLPASSWORD",
+        "MYSQLDATABASE",
+        "MYSQLPORT",
+        "MYSQL_URL",
+        "DB_HOST",
+        "DB_PORT",
+        "DB_USER",
+        "DB_PASS",
+        "DB_NAME",
+    ]
+    env_vars = {v: os.getenv(v) for v in vars_esperadas}
+    return jsonify(env_vars)
 
-        try:
-            payload = request.get_json(force=True, silent=False) or {}
-        except Exception:
-            payload = {}
-
-        try:
-            r = requests.post(highlighter, json=payload, timeout=120)
-        except requests.RequestException as e:
-            return (
-                jsonify(
-                    {"error": f"No se pudo contactar el servicio de resaltado: {e}"}
-                ),
-                502,
-            )
-
-        if r.status_code != 200:
-            try:
-                err = r.json()
-            except Exception:
-                err = {"error": r.text}
-            return (
-                jsonify(
-                    {
-                        "error": err.get("error", "Error en servicio de resaltado"),
-                        "status": r.status_code,
-                    }
-                ),
-                502,
-            )
-
-        return Response(r.content, status=200, mimetype="application/pdf")
-
-    return app
-
-
-# Instancia para Gunicorn / Railway
-app = create_app()
-
-if __name__ == "__main__":
-    # Ejecución local
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port)
+# Ping dentro del blueprint — GET /api/documentos/ping (opcional)
+@documentos_bp.route("/ping", methods=["GET"])
+def ping():
+    try:
+        conn = get_db_connection()
+        conn.close()
+        return jsonify({"message": "pong", "db": "conexión exitosa"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
