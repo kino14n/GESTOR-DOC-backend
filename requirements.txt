@@ -1,5 +1,6 @@
-Flask
-Flask-Cors
-mysql-connector-python
-python-dotenv
-gunicorn
+Flask>=3.0
+Flask-Cors>=4.0
+gunicorn>=21.2
+requests>=2.31
+mysql-connector-python>=8.0
+python-dotenv>=1.0
