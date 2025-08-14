@@ -2,5 +2,5 @@ Flask>=3.0
 Flask-Cors>=4.0
 gunicorn>=21.2
 requests>=2.31
-PyMySQL>=1.1.0  # <--- Esta es la línea clave que hay que corregir
+PyMySQL>=1.1.0
 python-dotenv>=1.0
