@@ -1,15 +1,20 @@
-
 # GESTOR-DOC-backend/routes/documentos.py
 import os
 import pymysql
-import requests  # <-- Importación para la nueva función
-import re        # <-- Importación para la nueva función
-from flask import Blueprint, request, jsonify, Response # <-- 'Response' añadido
+import requests
+import re
+from flask import Blueprint, request, jsonify, Response
 from werkzeug.utils import secure_filename
 
 documentos_bp = Blueprint("documentos", __name__)
 
-UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
+# --- CONFIGURACIÓN DE LA CARPETA DE SUBIDAS ---
+# Usa el Volumen de Railway si existe, si no, una carpeta local.
+if os.path.exists("/data/uploads"):
+    UPLOAD_FOLDER = "/data/uploads"
+else:
+    UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
+
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # -------------------- DB helpers (Sin cambios) --------------------
@@ -35,7 +40,7 @@ def get_db_connection():
         autocommit=True,
     )
 
-# ==================== RUTAS EXISTENTES (Sin cambios) ====================
+# ==================== RUTAS EXISTENTES ====================
 
 @documentos_bp.route("/importar_sql", methods=["POST"])
 def importar_sql():
@@ -201,7 +206,6 @@ def eliminar_documento(doc_id):
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
         conn.close()
-
 
 @documentos_bp.route("/search", methods=["POST"])
 def busqueda_voraz():
