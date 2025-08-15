@@ -1,5 +1,4 @@
-
-# routes/documentos.py — GESTOR-DOC
+# GESTOR-DOC-backend/routes/documentos.py
 import os
 import pymysql
 from flask import Blueprint, request, jsonify
@@ -7,7 +6,6 @@ from werkzeug.utils import secure_filename
 
 documentos_bp = Blueprint("documentos", __name__)
 
-# Carpeta de uploads (relativa al working dir en Railway)
 UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -36,8 +34,10 @@ def get_db_connection():
 
 # ==================== RUTAS ====================
 
+# --- (Las rutas para importar, listar, obtener, subir, editar y eliminar se mantienen igual) ---
 @documentos_bp.route("/importar_sql", methods=["POST"])
 def importar_sql():
+    # ... (código sin cambios)
     if "file" not in request.files:
         return jsonify({"error": "No se ha enviado ningún archivo"}), 400
     archivo = request.files["file"]
@@ -60,16 +60,14 @@ def importar_sql():
 @documentos_bp.route("", methods=["GET"])
 @documentos_bp.route("/", methods=["GET"])
 def listar_documentos():
+    # ... (código sin cambios)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT 
-                    d.id,
-                    d.name,
-                    d.date,
-                    d.path,
+                    d.id, d.name, d.date, d.path,
                     GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
                 FROM documents d
                 LEFT JOIN codes c ON c.document_id = d.id
@@ -84,18 +82,17 @@ def listar_documentos():
     finally:
         conn.close()
 
+
 @documentos_bp.route("/<int:doc_id>", methods=["GET"])
 def obtener_documento(doc_id):
+    # ... (código sin cambios)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT 
-                    d.id,
-                    d.name,
-                    d.date,
-                    d.path,
+                    d.id, d.name, d.date, d.path,
                     GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
                 FROM documents d
                 LEFT JOIN codes c ON c.document_id = d.id
@@ -115,6 +112,7 @@ def obtener_documento(doc_id):
 
 @documentos_bp.route("/upload", methods=["POST"])
 def upload_document():
+    # ... (código sin cambios)
     if "file" not in request.files:
         return jsonify({"error": "No se envió el archivo PDF"}), 400
     f = request.files["file"]
@@ -157,6 +155,7 @@ def upload_document():
 
 @documentos_bp.route("/<int:doc_id>", methods=["PUT"])
 def editar_documento(doc_id):
+    # ... (código sin cambios)
     data = request.form or request.json or {}
     name = data.get("nombre") or data.get("name")
     date = data.get("fecha") or data.get("date")
@@ -186,6 +185,7 @@ def editar_documento(doc_id):
 
 @documentos_bp.route("/<int:doc_id>", methods=["DELETE"])
 def eliminar_documento(doc_id):
+    # ... (código sin cambios)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -206,8 +206,10 @@ def eliminar_documento(doc_id):
     finally:
         conn.close()
 
+
 @documentos_bp.route("/search", methods=["POST"])
 def busqueda_voraz():
+    # ... (código sin cambios)
     data = request.get_json(silent=True) or {}
     texto = (data.get("texto") or "").strip()
     if not texto:
@@ -239,46 +241,61 @@ def busqueda_voraz():
     finally:
         conn.close()
 
+# --- 👇 ESTA ES LA FUNCIÓN CORREGIDA ---
 @documentos_bp.route("/search_by_code", methods=["POST"])
 def buscar_por_codigo():
     data = request.get_json(silent=True) or {}
-    codigo = (data.get("codigo") or "").strip().upper()
+    codigo_buscado = (data.get("codigo") or "").strip().upper()
     modo = (data.get("modo") or "like").lower()
 
-    if not codigo:
+    if not codigo_buscado:
         return jsonify([])
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             if modo in ("prefijo", "prefix"):
+                # La lógica para sugerencias no cambia
                 cur.execute(
                     """
-                    SELECT DISTINCT c.code
-                    FROM codes c
-                    WHERE UPPER(c.code) LIKE %s
-                    ORDER BY c.code
-                    LIMIT 50
-                    """, (codigo + "%",),
+                    SELECT DISTINCT c.code FROM codes c
+                    WHERE UPPER(c.code) LIKE %s ORDER BY c.code LIMIT 50
+                    """, 
+                    (codigo_buscado + "%",)
                 )
                 return jsonify([r["code"] for r in cur.fetchall()])
 
-            if modo == "exacto":
-                where = "UPPER(c.code) = %s"
-                val = (codigo,)
-            else:
-                where = "UPPER(c.code) LIKE %s"
-                val = ("%" + codigo + "%",)
+            # --- MEJORA: Búsqueda flexible en nombre y códigos ---
+            termino_de_busqueda = f"%{codigo_buscado}%" if modo == "like" else codigo_buscado
+            
+            # 1. Obtiene los IDs de los documentos que coinciden
+            cur.execute(
+                """
+                SELECT id FROM documents WHERE UPPER(name) LIKE %s
+                UNION
+                SELECT document_id FROM codes WHERE UPPER(code) LIKE %s
+                """,
+                (termino_de_busqueda, termino_de_busqueda)
+            )
+            ids_documentos = [row['id'] for row in cur.fetchall()]
 
+            if not ids_documentos:
+                return jsonify([])
+
+            # 2. Obtiene la información completa de esos documentos
+            placeholders = ','.join(['%s'] * len(ids_documentos))
             cur.execute(
                 f"""
-                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
+                SELECT 
+                    d.id, d.name, d.date, d.path,
+                    COALESCE(GROUP_CONCAT(c.code ORDER BY c.code), 'N/A') AS codigos_extraidos
                 FROM documents d
-                LEFT JOIN codes c ON c.document_id = d.id
-                WHERE {where}
-                GROUP BY d.id
+                LEFT JOIN codes c ON d.id = c.document_id
+                WHERE d.id IN ({placeholders})
+                GROUP BY d.id, d.name, d.date, d.path
                 ORDER BY d.id DESC
-                """, val,
+                """,
+                tuple(ids_documentos)
             )
             rows = cur.fetchall()
         return jsonify(rows)
@@ -287,8 +304,10 @@ def buscar_por_codigo():
     finally:
         conn.close()
 
+# --- (El resto de las rutas se mantienen igual) ---
 @documentos_bp.route("/search_optima", methods=["POST"])
 def busqueda_optima():
+    # ... (código sin cambios)
     data = request.get_json(silent=True) or {}
     texto = (data.get("codigos") or data.get("texto") or "").strip()
     if not texto:
@@ -336,6 +355,7 @@ def busqueda_optima():
 
 @documentos_bp.route("/env", methods=["GET"])
 def mostrar_env():
+    # ... (código sin cambios)
     vars_esperadas = [
         "MYSQLHOST","MYSQLUSER","MYSQLPASSWORD","MYSQLDATABASE","MYSQLPORT","MYSQL_URL",
         "DB_HOST","DB_PORT","DB_USER","DB_PASS","DB_NAME",
@@ -345,6 +365,7 @@ def mostrar_env():
 
 @documentos_bp.route("/ping", methods=["GET"])
 def ping():
+    # ... (código sin cambios)
     try:
         conn = get_db_connection()
         conn.close()
