@@ -1,7 +1,10 @@
+
 # GESTOR-DOC-backend/routes/documentos.py
 import os
 import pymysql
-from flask import Blueprint, request, jsonify
+import requests  # <-- Importación para la nueva función
+import re        # <-- Importación para la nueva función
+from flask import Blueprint, request, jsonify, Response # <-- 'Response' añadido
 from werkzeug.utils import secure_filename
 
 documentos_bp = Blueprint("documentos", __name__)
@@ -9,7 +12,7 @@ documentos_bp = Blueprint("documentos", __name__)
 UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# -------------------- DB helpers --------------------
+# -------------------- DB helpers (Sin cambios) --------------------
 def _env(name, fallback=""):
     mapping = {
         "DB_HOST": "MYSQLHOST",
@@ -32,12 +35,10 @@ def get_db_connection():
         autocommit=True,
     )
 
-# ==================== RUTAS ====================
+# ==================== RUTAS EXISTENTES (Sin cambios) ====================
 
-# --- (Las rutas para importar, listar, obtener, subir, editar y eliminar se mantienen igual) ---
 @documentos_bp.route("/importar_sql", methods=["POST"])
 def importar_sql():
-    # ... (código sin cambios)
     if "file" not in request.files:
         return jsonify({"error": "No se ha enviado ningún archivo"}), 400
     archivo = request.files["file"]
@@ -60,7 +61,6 @@ def importar_sql():
 @documentos_bp.route("", methods=["GET"])
 @documentos_bp.route("/", methods=["GET"])
 def listar_documentos():
-    # ... (código sin cambios)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -85,7 +85,6 @@ def listar_documentos():
 
 @documentos_bp.route("/<int:doc_id>", methods=["GET"])
 def obtener_documento(doc_id):
-    # ... (código sin cambios)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -112,7 +111,6 @@ def obtener_documento(doc_id):
 
 @documentos_bp.route("/upload", methods=["POST"])
 def upload_document():
-    # ... (código sin cambios)
     if "file" not in request.files:
         return jsonify({"error": "No se envió el archivo PDF"}), 400
     f = request.files["file"]
@@ -155,7 +153,6 @@ def upload_document():
 
 @documentos_bp.route("/<int:doc_id>", methods=["PUT"])
 def editar_documento(doc_id):
-    # ... (código sin cambios)
     data = request.form or request.json or {}
     name = data.get("nombre") or data.get("name")
     date = data.get("fecha") or data.get("date")
@@ -185,7 +182,6 @@ def editar_documento(doc_id):
 
 @documentos_bp.route("/<int:doc_id>", methods=["DELETE"])
 def eliminar_documento(doc_id):
-    # ... (código sin cambios)
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -209,7 +205,6 @@ def eliminar_documento(doc_id):
 
 @documentos_bp.route("/search", methods=["POST"])
 def busqueda_voraz():
-    # ... (código sin cambios)
     data = request.get_json(silent=True) or {}
     texto = (data.get("texto") or "").strip()
     if not texto:
@@ -241,7 +236,6 @@ def busqueda_voraz():
     finally:
         conn.close()
 
-# --- 👇 ESTA ES LA FUNCIÓN CORREGIDA ---
 @documentos_bp.route("/search_by_code", methods=["POST"])
 def buscar_por_codigo():
     data = request.get_json(silent=True) or {}
@@ -255,7 +249,6 @@ def buscar_por_codigo():
     try:
         with conn.cursor() as cur:
             if modo in ("prefijo", "prefix"):
-                # La lógica para sugerencias no cambia
                 cur.execute(
                     """
                     SELECT DISTINCT c.code FROM codes c
@@ -265,10 +258,8 @@ def buscar_por_codigo():
                 )
                 return jsonify([r["code"] for r in cur.fetchall()])
 
-            # --- MEJORA: Búsqueda flexible en nombre y códigos ---
             termino_de_busqueda = f"%{codigo_buscado}%" if modo == "like" else codigo_buscado
             
-            # 1. Obtiene los IDs de los documentos que coinciden
             cur.execute(
                 """
                 SELECT id FROM documents WHERE UPPER(name) LIKE %s
@@ -282,7 +273,6 @@ def buscar_por_codigo():
             if not ids_documentos:
                 return jsonify([])
 
-            # 2. Obtiene la información completa de esos documentos
             placeholders = ','.join(['%s'] * len(ids_documentos))
             cur.execute(
                 f"""
@@ -304,10 +294,8 @@ def buscar_por_codigo():
     finally:
         conn.close()
 
-# --- (El resto de las rutas se mantienen igual) ---
 @documentos_bp.route("/search_optima", methods=["POST"])
 def busqueda_optima():
-    # ... (código sin cambios)
     data = request.get_json(silent=True) or {}
     texto = (data.get("codigos") or data.get("texto") or "").strip()
     if not texto:
@@ -353,9 +341,61 @@ def busqueda_optima():
 
     return jsonify({"documentos": seleccionados, "codigos_faltantes": sorted(list(faltantes))})
 
+# ==================== NUEVA RUTA PARA PDF RESALTADO ====================
+
+@documentos_bp.route("/resaltar", methods=['POST'])
+def resaltar_pdf_remoto():
+    data = request.get_json()
+    if not data or 'pdf_path' not in data or 'codes' not in data:
+        return jsonify({"error": "Faltan datos (pdf_path, codes)"}), 400
+
+    pdf_filename = data['pdf_path']
+    codes_list = data['codes']
+    
+    highlighter_url = os.getenv('HIGHLIGHTER_URL')
+    if not highlighter_url:
+        return jsonify({"error": "El servicio de resaltado no está configurado (falta HIGHLIGHTER_URL)"}), 500
+
+    local_pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
+    if not os.path.exists(local_pdf_path):
+        return jsonify({"error": f"Archivo PDF no encontrado: {pdf_filename}"}), 404
+
+    try:
+        with open(local_pdf_path, 'rb') as pdf_file:
+            files = {'pdf_file': (pdf_filename, pdf_file, 'application/pdf')}
+            payload = {'specific_codes': ",".join(codes_list)}
+            
+            resaltador_response = requests.post(highlighter_url, files=files, data=payload, timeout=180)
+            resaltador_response.raise_for_status()
+
+        html_content = resaltador_response.text
+        match = re.search(r'href="(/descargar/[^"]+)"', html_content)
+        
+        if not match:
+            error_match = re.search(r'<div class="flash-message error">\s*(.+?)\s*</div>', html_content, re.DOTALL)
+            error_message = error_match.group(1).strip() if error_match else "No se pudo procesar el PDF."
+            return jsonify({"error": error_message}), 500
+
+        download_path = match.group(1)
+        final_pdf_url = highlighter_url.rstrip('/') + download_path
+        final_pdf_response = requests.get(final_pdf_url, stream=True, timeout=180)
+        final_pdf_response.raise_for_status()
+
+        return Response(
+            final_pdf_response.content,
+            mimetype='application/pdf',
+            headers={'Content-Disposition': f'inline; filename=resaltado_{pdf_filename}'}
+        )
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Error de comunicación con el servicio de resaltado: {e}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Error inesperado: {str(e)}"}), 500
+
+# ==================== RUTAS DE UTILIDAD (Sin cambios) ====================
+
 @documentos_bp.route("/env", methods=["GET"])
 def mostrar_env():
-    # ... (código sin cambios)
     vars_esperadas = [
         "MYSQLHOST","MYSQLUSER","MYSQLPASSWORD","MYSQLDATABASE","MYSQLPORT","MYSQL_URL",
         "DB_HOST","DB_PORT","DB_USER","DB_PASS","DB_NAME",
@@ -365,7 +405,6 @@ def mostrar_env():
 
 @documentos_bp.route("/ping", methods=["GET"])
 def ping():
-    # ... (código sin cambios)
     try:
         conn = get_db_connection()
         conn.close()
