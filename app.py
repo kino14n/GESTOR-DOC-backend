@@ -2,7 +2,8 @@
 import os
 from flask import Flask, jsonify
 from flask_cors import CORS
-from routes.documentos import documentos_bp
+# Importamos la función 'upload_document' para usarla en el alias
+from routes.documentos import documentos_bp, upload_document
 
 def create_app():
     """
@@ -11,12 +12,20 @@ def create_app():
     """
     app = Flask(__name__)
 
-    # --- Configuración de CORS ---
+    # --- Configuración de CORS (AMPLIADA) ---
+    # Aplica a todas las rutas (r"/*") para máxima compatibilidad
     origins = os.getenv("CORS_ORIGINS", "*").split(",")
-    CORS(app, resources={r"/api/*": {"origins": origins}})
+    CORS(app, resources={r"/*": {"origins": origins}})
 
     # --- Registro de Rutas (Blueprint) ---
     app.register_blueprint(documentos_bp, url_prefix='/api/documentos')
+
+    # --- [NUEVO] Ruta Alias para /upload ---
+    # Si el frontend llama a /upload por error, esta ruta lo captura
+    # y lo redirige internamente a la función correcta.
+    @app.route('/upload', methods=['POST'])
+    def upload_alias():
+        return upload_document()
 
     # --- Ruta de Bienvenida ---
     @app.route('/')
