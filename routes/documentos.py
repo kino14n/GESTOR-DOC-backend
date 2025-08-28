@@ -276,15 +276,18 @@ def buscar_por_codigo():
                 termino_code = f"%{codigo_buscado}%"
                 op = "LIKE"
 
-            cur.execute(
-                f"""
-                SELECT id FROM documents WHERE UPPER(name) {op} %s
-                UNION
-                SELECT document_id AS id FROM codes WHERE UPPER(code) {op} %s
-                """,
-                (termino_name, termino_code),
-            )
-            ids_documentos = [row["id"] for row in cur.fetchall()]
+            # --- INICIO DEL CÓDIGO CORREGIDO ---
+            # 1. Buscar documentos con nombres coincidentes
+            cur.execute(f"SELECT id FROM documents WHERE UPPER(name) {op} %s", (termino_name,))
+            ids_from_name = {row["id"] for row in cur.fetchall()}
+
+            # 2. Buscar documentos con códigos coincidentes
+            cur.execute(f"SELECT document_id AS id FROM codes WHERE UPPER(code) {op} %s", (termino_code,))
+            ids_from_code = {row["id"] for row in cur.fetchall()}
+
+            # 3. Combinar los resultados (usando conjuntos para evitar duplicados)
+            ids_documentos = list(ids_from_name | ids_from_code)
+            # --- FIN DEL CÓDIGO CORREGIDO ---
 
             if not ids_documentos:
                 return jsonify([])
