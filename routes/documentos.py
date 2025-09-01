@@ -5,7 +5,7 @@ import json
 import pymysql
 import requests
 import boto3
-import time # <-- Importante: Se añade la librería para las pausas
+import time 
 from flask import Blueprint, request, jsonify, Response, g
 from werkzeug.utils import secure_filename
 
@@ -184,15 +184,53 @@ def obtener_documento(doc_id):
 
 @documentos_bp.route("/<int:doc_id>", methods=["PUT"])
 def editar_documento(doc_id):
-    data = request.form or request.json or {}
-    name = data.get("nombre") or data.get("name")
-    date = data.get("fecha") or data.get("date")
-    codigos = data.get("codigos") or data.get("codigos_extraidos")
+    name = request.form.get("nombre") or request.form.get("name")
+    date = request.form.get("fecha") or request.form.get("date")
+    codigos = request.form.get("codigos") or request.form.get("codigos_extraidos")
+
+    new_object_key = None
+    old_object_key = None
+    
+    # 1. Lógica para manejar la actualización del archivo PDF
+    if "file" in request.files:
+        new_file = request.files["file"]
+        if new_file and new_file.filename:
+            tenant_id = g.tenant_id
+            filename = secure_filename(new_file.filename)
+            new_object_key = f"{tenant_id}/{filename}"
+            bucket_name = os.getenv("R2_BUCKET_NAME")
+            s3 = get_s3_client()
+            
+            try:
+                # Primero, subimos el nuevo archivo a R2
+                s3.upload_fileobj(new_file, bucket_name, new_object_key, ExtraArgs={'ContentType': new_file.content_type})
+            except Exception as e:
+                print(f"Error al subir el nuevo archivo a R2 durante la edición: {str(e)}")
+                return jsonify({"error": "No se pudo actualizar el archivo en el almacenamiento."}), 500
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("UPDATE documents SET name=%s, date=%s WHERE id=%s", (name, date, doc_id))
+            # Si subimos un archivo nuevo, necesitamos borrar el antiguo de R2
+            if new_object_key:
+                # Obtenemos la ruta (key) del archivo antiguo ANTES de actualizar la BD
+                cur.execute("SELECT path FROM documents WHERE id=%s", (doc_id,))
+                result = cur.fetchone()
+                if result:
+                    old_object_key = result.get('path')
+
+            # 2. Construir la consulta SQL dinámicamente
+            sql_parts = ["name=%s", "date=%s"]
+            params = [name, date]
+            if new_object_key:
+                sql_parts.append("path=%s")
+                params.append(new_object_key)
+            
+            params.append(doc_id)
+            query = f"UPDATE documents SET {', '.join(sql_parts)} WHERE id=%s"
+            cur.execute(query, tuple(params))
+
+            # 3. Actualizar los códigos (lógica sin cambios)
             if codigos is not None:
                 cur.execute("DELETE FROM codes WHERE document_id=%s", (doc_id,))
                 for code in _codes_list(codigos):
@@ -200,12 +238,30 @@ def editar_documento(doc_id):
                         "INSERT INTO codes (document_id, code) VALUES (%s, %s)",
                         (doc_id, code),
                     )
+            
+        # 4. Si todo salió bien en la BD y reemplazamos un archivo, borrar el antiguo de R2
+        if old_object_key and old_object_key != new_object_key:
+            try:
+                s3 = get_s3_client()
+                s3.delete_object(Bucket=os.getenv("R2_BUCKET_NAME"), Key=old_object_key)
+            except Exception as e:
+                # Si falla el borrado, solo lo registramos, no revertimos la operación
+                print(f"ADVERTENCIA: No se pudo borrar el archivo antiguo '{old_object_key}' de R2: {e}")
+
         return jsonify({"ok": True})
     except Exception as e:
+        # Si hay un error con la BD, debemos borrar el nuevo archivo que ya subimos a R2
+        if new_object_key:
+            try:
+                s3 = get_s3_client()
+                s3.delete_object(Bucket=os.getenv("R2_BUCKET_NAME"), Key=new_object_key)
+            except:
+                pass # Ignorar error de borrado en cascada
         return jsonify({"error": str(e)}), 500
     finally:
         if conn and conn.open:
             conn.close()
+
 
 @documentos_bp.route("/<int:doc_id>", methods=["DELETE"])
 def eliminar_documento(doc_id):
