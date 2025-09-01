@@ -5,6 +5,7 @@ import json
 import pymysql
 import requests
 import boto3
+import time # <-- Importante: Se añade la librería para las pausas
 from flask import Blueprint, request, jsonify, Response, g
 from werkzeug.utils import secure_filename
 
@@ -15,20 +16,12 @@ with open('tenants.json', 'r') as f:
     TENANTS_CONFIG = json.load(f)
 
 
-# --- Middleware para identificar al cliente en cada petición (CORREGIDO) ---
+# --- Middleware para identificar al cliente en cada petición ---
 @documentos_bp.before_request
 def identify_tenant():
-    """
-    Se ejecuta antes de cada ruta. Identifica al cliente (tenant)
-    basado en la cabecera X-Tenant-ID y guarda su configuración.
-    Permite pasar las peticiones OPTIONS para el pre-vuelo de CORS.
-    """
-    # --- INICIO DE LA CORRECCIÓN ---
     # Si la petición es un OPTIONS (pre-vuelo de CORS), la dejamos pasar
-    # sin verificar el tenant. Flask-CORS se encargará de responder.
     if request.method == 'OPTIONS':
         return None
-    # --- FIN DE LA CORRECCIÓN ---
 
     tenant_id = request.headers.get('X-Tenant-ID')
     if not tenant_id or tenant_id not in TENANTS_CONFIG:
@@ -38,23 +31,44 @@ def identify_tenant():
     g.tenant_id = tenant_id
 
 
-# --- Funciones Auxiliares (sin cambios) ---
+# --- Funciones Auxiliares ---
 
 def get_db_connection():
+    """
+    Devuelve una conexión a la base de datos del cliente.
+    Implementa un sistema de reintentos para manejar el "despertar" de la BD en Railway.
+    """
     if 'tenant_config' not in g:
         raise Exception("Error interno: No se pudo identificar la configuración del cliente.")
     
     config = g.tenant_config
-    return pymysql.connect(
-        host=config["db_host"],
-        user=config["db_user"],
-        password=config["db_pass"],
-        database=config["db_name"],
-        port=config.get("db_port", 3306),
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    
+    max_retries = 5
+    retry_delay = 2  # segundos
+
+    for attempt in range(max_retries):
+        try:
+            # Intenta conectar con un timeout más largo
+            conn = pymysql.connect(
+                host=config["db_host"],
+                user=config["db_user"],
+                password=config["db_pass"],
+                database=config["db_name"],
+                port=config.get("db_port", 3306),
+                charset="utf8mb4",
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=True,
+                connect_timeout=15 
+            )
+            return conn # Si la conexión es exitosa, la devuelve
+        except pymysql.err.OperationalError as e:
+            # Si el error es "Connection refused", espera y reintenta
+            if e.args[0] == 2003 and attempt < max_retries - 1:
+                print(f"Intento {attempt + 1}: No se pudo conectar a la base de datos, reintentando en {retry_delay} segundos...")
+                time.sleep(retry_delay)
+            else:
+                # Si es otro error o el último intento, lanza la excepción
+                raise e
 
 def get_s3_client():
     return boto3.client(
@@ -70,7 +84,7 @@ def _codes_list(raw: str):
         return []
     return [c.strip().upper() for c in raw.replace("\n", ",").replace(";", ",").replace(" ", ",").split(",") if c.strip()]
 
-# ==================== RUTAS CRUD y Búsqueda (sin cambios) ====================
+# ==================== RUTAS CRUD y Búsqueda ====================
 
 @documentos_bp.route("/upload", methods=["POST"])
 def upload_document():
@@ -114,7 +128,8 @@ def upload_document():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        conn.close()
+        if conn and conn.open:
+            conn.close()
 
 @documentos_bp.route("/", methods=["GET"])
 def listar_documentos():
@@ -137,7 +152,8 @@ def listar_documentos():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        conn.close()
+        if conn and conn.open:
+            conn.close()
 
 @documentos_bp.route("/<int:doc_id>", methods=["GET"])
 def obtener_documento(doc_id):
@@ -163,7 +179,8 @@ def obtener_documento(doc_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        conn.close()
+        if conn and conn.open:
+            conn.close()
 
 @documentos_bp.route("/<int:doc_id>", methods=["PUT"])
 def editar_documento(doc_id):
@@ -187,7 +204,8 @@ def editar_documento(doc_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        conn.close()
+        if conn and conn.open:
+            conn.close()
 
 @documentos_bp.route("/<int:doc_id>", methods=["DELETE"])
 def eliminar_documento(doc_id):
@@ -209,7 +227,8 @@ def eliminar_documento(doc_id):
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
-        conn.close()
+        if conn and conn.open:
+            conn.close()
 
 @documentos_bp.route("/search_by_code", methods=["POST"])
 def buscar_por_codigo():
@@ -263,7 +282,8 @@ def buscar_por_codigo():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        conn.close()
+        if conn and conn.open:
+            conn.close()
 
 @documentos_bp.route("/search_optima", methods=["POST"])
 def busqueda_optima():
@@ -293,7 +313,8 @@ def busqueda_optima():
             )
             docs = cur.fetchall()
     finally:
-        conn.close()
+        if conn and conn.open:
+            conn.close()
 
     docs_sets = [{"doc": d, "codes": {x.strip().upper() for x in (d.get("codigos_encontrados") or "").split(",") if x.strip()}} for d in docs]
     
