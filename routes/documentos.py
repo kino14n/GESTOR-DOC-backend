@@ -15,30 +15,32 @@ with open('tenants.json', 'r') as f:
     TENANTS_CONFIG = json.load(f)
 
 
-# --- Middleware para identificar al cliente en cada petición ---
+# --- Middleware para identificar al cliente en cada petición (CORREGIDO) ---
 @documentos_bp.before_request
 def identify_tenant():
     """
     Se ejecuta antes de cada ruta. Identifica al cliente (tenant)
-    basado en la cabecera X-Tenant-ID y guarda su configuración para
-    ser usada en la petición actual.
+    basado en la cabecera X-Tenant-ID y guarda su configuración.
+    Permite pasar las peticiones OPTIONS para el pre-vuelo de CORS.
     """
+    # --- INICIO DE LA CORRECCIÓN ---
+    # Si la petición es un OPTIONS (pre-vuelo de CORS), la dejamos pasar
+    # sin verificar el tenant. Flask-CORS se encargará de responder.
+    if request.method == 'OPTIONS':
+        return None
+    # --- FIN DE LA CORRECCIÓN ---
+
     tenant_id = request.headers.get('X-Tenant-ID')
     if not tenant_id or tenant_id not in TENANTS_CONFIG:
         return jsonify({"error": "Cliente no válido o no especificado"}), 403
     
-    # 'g' es un objeto especial de Flask que almacena datos solo durante una petición.
     g.tenant_config = TENANTS_CONFIG[tenant_id]
     g.tenant_id = tenant_id
 
 
-# --- Funciones Auxiliares ---
+# --- Funciones Auxiliares (sin cambios) ---
 
 def get_db_connection():
-    """
-    Devuelve una conexión a la base de datos del cliente que fue
-    identificado por el middleware.
-    """
     if 'tenant_config' not in g:
         raise Exception("Error interno: No se pudo identificar la configuración del cliente.")
     
@@ -55,9 +57,6 @@ def get_db_connection():
     )
 
 def get_s3_client():
-    """
-    Crea y devuelve un cliente boto3 configurado para Cloudflare R2.
-    """
     return boto3.client(
         's3',
         endpoint_url=os.getenv("R2_ENDPOINT_URL"),
@@ -71,7 +70,7 @@ def _codes_list(raw: str):
         return []
     return [c.strip().upper() for c in raw.replace("\n", ",").replace(";", ",").replace(" ", ",").split(",") if c.strip()]
 
-# ==================== RUTAS CRUD y Búsqueda ====================
+# ==================== RUTAS CRUD y Búsqueda (sin cambios) ====================
 
 @documentos_bp.route("/upload", methods=["POST"])
 def upload_document():
@@ -310,8 +309,6 @@ def busqueda_optima():
         faltantes -= cubre
 
     return jsonify({"documentos": seleccionados, "codigos_faltantes": sorted(list(faltantes))})
-
-# ==================== RUTAS DE SERVICIOS EXTERNOS ====================
 
 @documentos_bp.route("/resaltar", methods=["POST"])
 def resaltar_pdf_remoto():

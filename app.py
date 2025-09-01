@@ -11,18 +11,20 @@ def create_app() -> Flask:
     app = Flask(__name__)
 
     # --- CONFIGURACIÓN DE CORS MEJORADA ---
-    # Lee la variable de entorno CORS_ORIGINS. Si no existe, permite todo (*).
+    # Lee los dominios permitidos desde una variable de entorno.
+    # Si no se especifica, permite cualquier origen (útil para desarrollo).
     origins = os.getenv("CORS_ORIGINS", "*").split(",")
     
     CORS(
         app,
         resources={r"/api/*": {"origins": origins}},
         expose_headers=["Content-Disposition"],
-        # Permite las cabeceras necesarias, incluyendo la de identificación del cliente.
+        # Permite las cabeceras estándar y nuestra cabecera personalizada.
         allow_headers=["Content-Type", "X-Tenant-ID"],
+        # Flask-CORS maneja OPTIONS automáticamente.
     )
 
-    # Registrar el blueprint para manejar las rutas de documentos
+    # Registrar el blueprint que contiene todas nuestras rutas
     app.register_blueprint(documentos_bp, url_prefix="/api/documentos")
 
     @app.route("/api")
@@ -35,9 +37,8 @@ def create_app() -> Flask:
 
     return app
 
-
+# Este bloque solo se ejecuta si corres el archivo directamente (ej. python app.py)
 if __name__ == "__main__":
-    # Permite especificar el puerto vía variable de entorno, default 5001
     app = create_app()
     port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=True)
