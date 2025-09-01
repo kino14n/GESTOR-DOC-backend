@@ -20,7 +20,7 @@ def create_app() -> Flask:
     cors_cfg = {
         "origins": allowed_origins or ["*"],
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
+        "allow_headers": ["Content-Type", "X-Tenant-ID"],
         "supports_credentials": False,
     }
     CORS(
