@@ -1,45 +1,55 @@
 # GESTOR-DOC-backend/routes/documentos.py
 import os
 import re
+import json
 import pymysql
 import requests
-from flask import Blueprint, request, jsonify, Response, send_from_directory
+import boto3
+from flask import Blueprint, request, jsonify, Response, g
 from werkzeug.utils import secure_filename
 
 documentos_bp = Blueprint("documentos", __name__)
 
-# --- UPLOADS: usa volumen de Railway si existe, si no carpeta local ---
-UPLOAD_FOLDER = "/data/uploads" if os.path.exists("/data/uploads") else os.path.join(os.getcwd(), "uploads")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# --- Cargar la configuración de todos los clientes desde el archivo JSON ---
+with open('tenants.json', 'r') as f:
+    TENANTS_CONFIG = json.load(f)
 
-# -------------------- DB helpers --------------------
-def _env(name, fallback=""):
-    """
-    Lee variables DB_* o sus equivalentes MYSQL* que inyecta Railway.
-    """
-    mapping = {
-        "DB_HOST": "MYSQLHOST",
-        "DB_PORT": "MYSQLPORT",
-        "DB_USER": "MYSQLUSER",
-        "DB_PASS": "MYSQLPASSWORD",
-        "DB_NAME": "MYSQLDATABASE",  # OJO: Railway usa MYSQLDATABASE (sin guión bajo)
-    }
-    return os.getenv(name) or os.getenv(mapping.get(name, ""), fallback)
+
+# --- Middleware para identificar al cliente en cada petición ---
+@documentos_bp.before_request
+def identify_tenant():
+    tenant_id = request.headers.get('X-Tenant-ID')
+    if not tenant_id or tenant_id not in TENANTS_CONFIG:
+        return jsonify({"error": "Cliente no válido o no especificado"}), 403
+    g.tenant_config = TENANTS_CONFIG[tenant_id]
+    g.tenant_id = tenant_id
+
+
+# --- Funciones Auxiliares ---
 
 def get_db_connection():
-    """
-    Acepta tanto MYSQLDATABASE como MYSQL_DATABASE (compat).
-    """
-    db_name = os.getenv("MYSQL_DATABASE") or _env("DB_NAME")
+    if 'tenant_config' not in g:
+        raise Exception("Error interno: No se pudo identificar la configuración del cliente.")
+    
+    config = g.tenant_config
     return pymysql.connect(
-        host=_env("DB_HOST", "127.0.0.1"),
-        port=int(_env("DB_PORT", "3306") or "3306"),
-        user=_env("DB_USER"),
-        password=_env("DB_PASS"),
-        database=db_name,
+        host=config["db_host"],
+        user=config["db_user"],
+        password=config["db_pass"],
+        database=config["db_name"],
+        port=config.get("db_port", 3306),
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
+    )
+
+def get_s3_client():
+    return boto3.client(
+        's3',
+        endpoint_url=os.getenv("R2_ENDPOINT_URL"),
+        aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
+        region_name='auto',
     )
 
 def _codes_list(raw: str):
@@ -47,32 +57,52 @@ def _codes_list(raw: str):
         return []
     return [c.strip().upper() for c in raw.replace("\n", ",").replace(";", ",").replace(" ", ",").split(",") if c.strip()]
 
-# ==================== RUTAS ====================
+# ==================== RUTAS CRUD y Búsqueda ====================
 
-# Importación de SQL (útil para seed)
-@documentos_bp.route("/importar_sql", methods=["POST"])
-def importar_sql():
+@documentos_bp.route("/upload", methods=["POST"])
+def upload_document():
     if "file" not in request.files:
-        return jsonify({"error": "No se ha enviado ningún archivo"}), 400
-    archivo = request.files["file"]
-    if not archivo.filename:
-        return jsonify({"error": "No se ha seleccionado ningún archivo"}), 400
+        return jsonify({"error": "No se envió el archivo PDF"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "Archivo sin nombre"}), 400
 
-    contenido = archivo.read().decode("utf-8", errors="ignore")
-    sentencias = [s.strip() for s in contenido.split(";") if s.strip()]
+    tenant_id = g.tenant_id
+    filename = secure_filename(f.filename)
+    object_key = f"{tenant_id}/{filename}"
+    bucket_name = os.getenv("R2_BUCKET_NAME")
+    s3 = get_s3_client()
+
+    try:
+        s3.upload_fileobj(f, bucket_name, object_key, ExtraArgs={'ContentType': f.content_type})
+    except Exception as e:
+        print(f"Error al subir a R2: {str(e)}")
+        return jsonify({"error": "Error interno al guardar el archivo."}), 500
+
+    name = request.form.get("nombre") or request.form.get("name") or filename
+    date = request.form.get("fecha") or request.form.get("date")
+    codigos = request.form.get("codigos") or request.form.get("codigos_extraidos")
+
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            for s in sentencias:
-                cur.execute(s)
-        return jsonify({"mensaje": "SQL importado exitosamente"})
+            cur.execute(
+                "INSERT INTO documents (name, date, path) VALUES (%s, %s, %s)",
+                (name, date, object_key),
+            )
+            document_id = cur.lastrowid
+            if codigos:
+                for code in _codes_list(codigos):
+                    cur.execute(
+                        "INSERT INTO codes (document_id, code) VALUES (%s, %s)",
+                        (document_id, code),
+                    )
+        return jsonify({"ok": True, "id": document_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
 
-# Listado
-@documentos_bp.route("", methods=["GET"])
 @documentos_bp.route("/", methods=["GET"])
 def listar_documentos():
     conn = get_db_connection()
@@ -96,7 +126,6 @@ def listar_documentos():
     finally:
         conn.close()
 
-# Obtener uno
 @documentos_bp.route("/<int:doc_id>", methods=["GET"])
 def obtener_documento(doc_id):
     conn = get_db_connection()
@@ -123,44 +152,6 @@ def obtener_documento(doc_id):
     finally:
         conn.close()
 
-# Subir
-@documentos_bp.route("/upload", methods=["POST"])
-def upload_document():
-    if "file" not in request.files:
-        return jsonify({"error": "No se envió el archivo PDF"}), 400
-    f = request.files["file"]
-    if not f.filename:
-        return jsonify({"error": "Archivo sin nombre"}), 400
-
-    filename = secure_filename(f.filename)
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-    f.save(file_path)
-
-    name = request.form.get("nombre") or request.form.get("name") or filename
-    date = request.form.get("fecha") or request.form.get("date")
-    codigos = request.form.get("codigos") or request.form.get("codigos_extraidos")
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO documents (name, date, path) VALUES (%s, %s, %s)",
-                (name, date, filename),
-            )
-            document_id = cur.lastrowid
-
-            for code in _codes_list(codigos):
-                cur.execute(
-                    "INSERT INTO codes (document_id, code) VALUES (%s, %s)",
-                    (document_id, code),
-                )
-        return jsonify({"ok": True, "id": document_id})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
-
-# Editar
 @documentos_bp.route("/<int:doc_id>", methods=["PUT"])
 def editar_documento(doc_id):
     data = request.form or request.json or {}
@@ -185,7 +176,6 @@ def editar_documento(doc_id):
     finally:
         conn.close()
 
-# Eliminar
 @documentos_bp.route("/<int:doc_id>", methods=["DELETE"])
 def eliminar_documento(doc_id):
     conn = get_db_connection()
@@ -194,12 +184,12 @@ def eliminar_documento(doc_id):
             cur.execute("SELECT path FROM documents WHERE id=%s", (doc_id,))
             row = cur.fetchone()
             if row and row.get("path"):
-                fp = os.path.join(UPLOAD_FOLDER, row["path"])
-                if os.path.exists(fp):
-                    try:
-                        os.remove(fp)
-                    except Exception:
-                        pass
+                try:
+                    s3 = get_s3_client()
+                    s3.delete_object(Bucket=os.getenv("R2_BUCKET_NAME"), Key=row["path"])
+                except Exception as e:
+                    print(f"Advertencia: No se pudo eliminar de R2 el objeto {row['path']}: {e}")
+            
             cur.execute("DELETE FROM codes WHERE document_id=%s", (doc_id,))
             cur.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
         return jsonify({"ok": True, "message": "Documento eliminado correctamente"})
@@ -208,41 +198,6 @@ def eliminar_documento(doc_id):
     finally:
         conn.close()
 
-# Búsqueda simple por lista de códigos/nombre
-@documentos_bp.route("/search", methods=["POST"])
-def busqueda_voraz():
-    data = request.get_json(silent=True) or {}
-    texto = (data.get("texto") or "").strip()
-    if not texto:
-        return jsonify([])
-
-    codigos = [c.strip().upper() for c in texto.replace(",", " ").replace("\n", " ").split() if c.strip()]
-    if not codigos:
-        return jsonify([])
-
-    fmt = ",".join(["%s"] * len(codigos))
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT d.*, GROUP_CONCAT(c.code ORDER BY c.code) AS codigos_extraidos
-                FROM documents d
-                LEFT JOIN codes c ON c.document_id = d.id
-                WHERE c.code IN ({fmt})
-                GROUP BY d.id
-                ORDER BY d.id DESC
-                """,
-                codigos,
-            )
-            rows = cur.fetchall()
-        return jsonify(rows)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    finally:
-        conn.close()
-
-# Sugerencias y búsqueda por código/nombre
 @documentos_bp.route("/search_by_code", methods=["POST"])
 def buscar_por_codigo():
     data = request.get_json(silent=True) or {}
@@ -255,39 +210,23 @@ def buscar_por_codigo():
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # Autocompletado por prefijo => lista de códigos
             if modo in ("prefijo", "prefix"):
                 cur.execute(
-                    """
-                    SELECT DISTINCT c.code FROM codes c
-                    WHERE UPPER(c.code) LIKE %s ORDER BY c.code LIMIT 50
-                    """,
+                    "SELECT DISTINCT c.code FROM codes c WHERE UPPER(c.code) LIKE %s ORDER BY c.code LIMIT 50",
                     (codigo_buscado + "%",),
                 )
                 return jsonify([r["code"] for r in cur.fetchall()])
 
-            # exacto => "="; like => LIKE con comodín
-            if modo in ("exacto", "exact"):
-                termino_name = codigo_buscado
-                termino_code = codigo_buscado
-                op = "="
-            else:
-                termino_name = f"%{codigo_buscado}%"
-                termino_code = f"%{codigo_buscado}%"
-                op = "LIKE"
+            op = "=" if modo in ("exacto", "exact") else "LIKE"
+            termino = codigo_buscado if op == "=" else f"%{codigo_buscado}%"
 
-            # --- INICIO DEL CÓDIGO CORREGIDO ---
-            # 1. Buscar documentos con nombres coincidentes
-            cur.execute(f"SELECT id FROM documents WHERE UPPER(name) {op} %s", (termino_name,))
+            cur.execute(f"SELECT id FROM documents WHERE UPPER(name) {op} %s", (termino,))
             ids_from_name = {row["id"] for row in cur.fetchall()}
 
-            # 2. Buscar documentos con códigos coincidentes
-            cur.execute(f"SELECT document_id AS id FROM codes WHERE UPPER(code) {op} %s", (termino_code,))
+            cur.execute(f"SELECT document_id AS id FROM codes WHERE UPPER(code) {op} %s", (termino,))
             ids_from_code = {row["id"] for row in cur.fetchall()}
 
-            # 3. Combinar los resultados (usando conjuntos para evitar duplicados)
             ids_documentos = list(ids_from_name | ids_from_code)
-            # --- FIN DEL CÓDIGO CORREGIDO ---
 
             if not ids_documentos:
                 return jsonify([])
@@ -301,7 +240,7 @@ def buscar_por_codigo():
                 FROM documents d
                 LEFT JOIN codes c ON d.id = c.document_id
                 WHERE d.id IN ({placeholders})
-                GROUP BY d.id, d.name, d.date, d.path
+                GROUP BY d.id
                 ORDER BY d.id DESC
                 """,
                 tuple(ids_documentos),
@@ -313,7 +252,6 @@ def buscar_por_codigo():
     finally:
         conn.close()
 
-# Set cover voraz (óptima)
 @documentos_bp.route("/search_optima", methods=["POST"])
 def busqueda_optima():
     data = request.get_json(silent=True) or {}
@@ -344,11 +282,8 @@ def busqueda_optima():
     finally:
         conn.close()
 
-    docs_sets = []
-    for d in docs:
-        codes_set = {x.strip().upper() for x in (d.get("codigos_encontrados") or "").split(",") if x.strip()}
-        docs_sets.append({"doc": d, "codes": codes_set})
-
+    docs_sets = [{"doc": d, "codes": {x.strip().upper() for x in (d.get("codigos_encontrados") or "").split(",") if x.strip()}} for d in docs]
+    
     faltantes = set(pedidos)
     seleccionados = []
     while faltantes and docs_sets:
@@ -362,30 +297,36 @@ def busqueda_optima():
 
     return jsonify({"documentos": seleccionados, "codigos_faltantes": sorted(list(faltantes))})
 
-# Resaltado de PDF a través de servicio externo
+# ==================== RUTAS DE SERVICIOS EXTERNOS ====================
+
 @documentos_bp.route("/resaltar", methods=["POST"])
 def resaltar_pdf_remoto():
     data = request.get_json(silent=True) or {}
-    if "pdf_path" not in data or "codes" not in data:
-        return jsonify({"error": "Faltan datos (pdf_path, codes)"}), 400
+    pdf_path = data.get("pdf_path")
+    codes_list = data.get("codes")
 
-    pdf_filename = data["pdf_path"]
-    codes_list = data["codes"]
+    if not pdf_path or not codes_list:
+        return jsonify({"error": "Faltan datos (pdf_path, codes)"}), 400
 
     highlighter_url = os.getenv("HIGHLIGHTER_URL")
     if not highlighter_url:
-        return jsonify({"error": "El servicio de resaltado no está configurado (falta HIGHLIGHTER_URL)"}), 500
+        return jsonify({"error": "El servicio de resaltado no está configurado"}), 500
 
-    local_pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
-    if not os.path.exists(local_pdf_path):
-        return jsonify({"error": f"Archivo PDF no encontrado: {pdf_filename}"}), 404
+    s3 = get_s3_client()
+    bucket_name = os.getenv("R2_BUCKET_NAME")
+    try:
+        pdf_object = s3.get_object(Bucket=bucket_name, Key=pdf_path)
+        pdf_content = pdf_object['Body'].read()
+    except Exception as e:
+        print(f"Error descargando de R2 el objeto {pdf_path}: {e}")
+        return jsonify({"error": f"Archivo PDF no encontrado en el almacenamiento: {pdf_path}"}), 404
 
     try:
-        with open(local_pdf_path, "rb") as pdf_file:
-            files = {"pdf_file": (pdf_filename, pdf_file, "application/pdf")}
-            payload = {"specific_codes": ",".join(codes_list)}
-            r = requests.post(highlighter_url, files=files, data=payload, timeout=180)
-            r.raise_for_status()
+        files = {"pdf_file": (os.path.basename(pdf_path), pdf_content, "application/pdf")}
+        payload = {"specific_codes": ",".join(codes_list)}
+        
+        r = requests.post(highlighter_url, files=files, data=payload, timeout=180)
+        r.raise_for_status()
 
         html_content = r.text
         match = re.search(r'href="(/descargar/[^"]+)"', html_content)
@@ -402,33 +343,9 @@ def resaltar_pdf_remoto():
         return Response(
             final_pdf_response.content,
             mimetype="application/pdf",
-            headers={"Content-Disposition": f"inline; filename=resaltado_{pdf_filename}"},
+            headers={"Content-Disposition": f"inline; filename=resaltado_{os.path.basename(pdf_path)}"},
         )
-
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Error de comunicación con el servicio de resaltado: {e}"}), 502
     except Exception as e:
         return jsonify({"error": f"Error inesperado: {str(e)}"}), 500
-
-# Servir PDFs subidos (para "Ver PDF")
-@documentos_bp.route("/files/<path:filename>", methods=["GET"])
-def descargar_pdf(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=False, mimetype="application/pdf")
-
-# Utilidad/env/ping (opcionales si ya tienes /api/env y /api/ping en app.py)
-@documentos_bp.route("/env", methods=["GET"])
-def mostrar_env():
-    keys = [
-        "MYSQLHOST","MYSQLUSER","MYSQLPASSWORD","MYSQLDATABASE","MYSQLPORT","MYSQL_URL",
-        "DB_HOST","DB_PORT","DB_USER","DB_PASS","DB_NAME",
-    ]
-    return jsonify({k: os.getenv(k) for k in keys})
-
-@documentos_bp.route("/ping", methods=["GET"])
-def ping():
-    try:
-        conn = get_db_connection()
-        conn.close()
-        return jsonify({"message": "pong", "db": "conexión exitosa"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500

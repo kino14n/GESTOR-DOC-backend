@@ -1,0 +1,9 @@
+{
+  "Cliente-Kino": {
+    "db_host": "mysql.railway.internal",
+    "db_user": "root",
+    "db_pass": "kfnZuyENbMsLXIiJToDuHqvseeyKmVuo",
+    "db_name": "railway",
+    "db_port": 3306
+  }
+}
