@@ -116,7 +116,7 @@ def _codes_list(raw: str):
 
 
 
-    
+
 def _parse_date(raw: str) -> str | None:
     """
     Intenta convertir la fecha recibida en varios formatos a ISO (YYYY-MM-DD).
@@ -144,7 +144,6 @@ def _parse_date(raw: str) -> str | None:
             continue
 
     return None
-
 
 
 # ==================== RUTAS CRUD y Búsqueda ====================
