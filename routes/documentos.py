@@ -145,7 +145,6 @@ def _parse_date(raw: str) -> str | None:
 
     return None
 
-
 # ==================== RUTAS CRUD y Búsqueda ====================
 
 @documentos_bp.route("/upload", methods=["POST"])
