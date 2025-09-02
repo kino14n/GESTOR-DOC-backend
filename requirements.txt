@@ -4,5 +4,8 @@ gunicorn>=21.2
 requests>=2.31
 PyMySQL>=1.1.0
 python-dotenv>=1.0
-cryptography
-boto3
+boto3>=1.28
+cryptography>=41.0
+urllib3>=2.0
+pyOpenSSL>=23.2
+certifi>=2023.7.22
