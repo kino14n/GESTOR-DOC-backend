@@ -114,23 +114,37 @@ def _codes_list(raw: str):
         return []
     return [c.strip().upper() for c in raw.replace("\n", ",").replace(";", ",").replace(" ", ",").split(",") if c.strip()]
 
-# Conversión de fechas: acepta formatos ISO (YYYY-MM-DD) o DD/MM/YYYY y
-# devuelve siempre una cadena ISO (YYYY-MM-DD) o None si no se puede
-def _parse_date(raw: str) -> str | None:
-    """Intenta convertir la fecha proveniente del formulario a formato ISO.
 
-    Si el valor está vacío o no coincide con ninguno de los formatos
-    soportados, devuelve None.
+
+    
+def _parse_date(raw: str) -> str | None:
+    """
+    Intenta convertir la fecha recibida en varios formatos a ISO (YYYY-MM-DD).
+    Si no logra parsear, devuelve None.
     """
     if not raw:
         return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+
+    raw = raw.strip()
+
+    # Lista de formatos aceptados
+    formatos = [
+        "%Y-%m-%d",  # 2025-02-04
+        "%d/%m/%Y",  # 04/02/2025
+        "%d-%m-%Y",  # 04-02-2025
+        "%m/%d/%Y",  # 02/04/2025
+        "%m-%d-%Y",  # 02-04-2025
+    ]
+
+    for fmt in formatos:
         try:
             dt = datetime.datetime.strptime(raw, fmt)
-            return dt.strftime("%Y-%m-%d")
+            return dt.strftime("%Y-%m-%d")  # Normalizamos a ISO
         except ValueError:
             continue
+
     return None
+
 
 
 # ==================== RUTAS CRUD y Búsqueda ====================
