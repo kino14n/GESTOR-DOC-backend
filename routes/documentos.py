@@ -116,34 +116,34 @@ def _codes_list(raw: str):
 
 
 
-
 def _parse_date(raw: str) -> str | None:
     """
     Intenta convertir la fecha recibida en varios formatos a ISO (YYYY-MM-DD).
-    Si no logra parsear, devuelve None.
+    Soporta YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, MM/DD/YYYY y MM-DD-YYYY.
     """
     if not raw:
         return None
 
     raw = raw.strip()
 
-    # Lista de formatos aceptados
     formatos = [
-        "%Y-%m-%d",  # 2025-02-04
-        "%d/%m/%Y",  # 04/02/2025
-        "%d-%m-%Y",  # 04-02-2025
-        "%m/%d/%Y",  # 02/04/2025
-        "%m-%d-%Y",  # 02-04-2025
+        "%Y-%m-%d",  # 2025-09-01
+        "%d/%m/%Y",  # 01/09/2025
+        "%d-%m-%Y",  # 01-09-2025
+        "%m/%d/%Y",  # 09/01/2025
+        "%m-%d-%Y",  # 09-01-2025
     ]
 
     for fmt in formatos:
         try:
             dt = datetime.datetime.strptime(raw, fmt)
-            return dt.strftime("%Y-%m-%d")  # Normalizamos a ISO
+            return dt.strftime("%Y-%m-%d")
         except ValueError:
             continue
 
     return None
+
+
 
 # ==================== RUTAS CRUD y Búsqueda ====================
 
