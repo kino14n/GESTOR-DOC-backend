@@ -76,7 +76,8 @@ def get_s3_client():
         endpoint_url=os.getenv("R2_ENDPOINT_URL"),
         aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
-        region_name='weur',  # Asegúrate de que aquí diga 'weur'
+        region_name='us-east-1',
+        verify=False  # <-- AÑADE ESTA LÍNEA FINAL
     )
 
 def _codes_list(raw: str):
