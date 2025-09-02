@@ -15,6 +15,7 @@ import os
 import re
 import json
 import time
+import datetime
 import pymysql
 import requests
 import boto3
@@ -113,6 +114,24 @@ def _codes_list(raw: str):
         return []
     return [c.strip().upper() for c in raw.replace("\n", ",").replace(";", ",").replace(" ", ",").split(",") if c.strip()]
 
+# Conversión de fechas: acepta formatos ISO (YYYY-MM-DD) o DD/MM/YYYY y
+# devuelve siempre una cadena ISO (YYYY-MM-DD) o None si no se puede
+def _parse_date(raw: str) -> str | None:
+    """Intenta convertir la fecha proveniente del formulario a formato ISO.
+
+    Si el valor está vacío o no coincide con ninguno de los formatos
+    soportados, devuelve None.
+    """
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            dt = datetime.datetime.strptime(raw, fmt)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
 
 # ==================== RUTAS CRUD y Búsqueda ====================
 
@@ -137,15 +156,21 @@ def upload_document():
         return jsonify({"error": "Error interno al guardar el archivo."}), 500
 
     name = request.form.get("nombre") or request.form.get("name") or filename
-    date = request.form.get("fecha") or request.form.get("date")
+    # Intenta obtener y convertir la fecha a ISO; si no es válida, devolverá None
+    raw_date = request.form.get("fecha") or request.form.get("date") or ""
+    date_iso = _parse_date(raw_date)
     codigos = request.form.get("codigos") or request.form.get("codigos_extraidos")
+
+    # Validar fecha: la columna 'date' en la BD es NOT NULL, por lo que se requiere una fecha válida
+    if date_iso is None:
+        return jsonify({"error": "Formato de fecha no válido; utilice YYYY-MM-DD o DD/MM/YYYY"}), 400
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO documents (name, date, path) VALUES (%s, %s, %s)",
-                (name, date, object_key),
+                (name, date_iso, object_key),
             )
             document_id = cur.lastrowid
             if codigos:
@@ -218,7 +243,9 @@ def obtener_documento(doc_id):
 @documentos_bp.route("/ ", methods=["PUT"])
 def editar_documento(doc_id):
     name = request.form.get("nombre") or request.form.get("name")
-    date = request.form.get("fecha") or request.form.get("date")
+    # Intenta convertir la fecha a ISO; puede ser opcional, pero si no se especifica se mantendrá
+    raw_date = request.form.get("fecha") or request.form.get("date") or ""
+    date_iso = _parse_date(raw_date) if raw_date else None
     codigos = request.form.get("codigos") or request.form.get("codigos_extraidos")
 
     new_object_key = None
@@ -253,15 +280,20 @@ def editar_documento(doc_id):
                     old_object_key = result.get('path')
 
             # 2. Construir la consulta SQL dinámicamente
-            sql_parts = ["name=%s", "date=%s"]
-            params = [name, date]
-            if new_object_key:
-                sql_parts.append("path=%s")
-                params.append(new_object_key)
-            
-            params.append(doc_id)
-            query = f"UPDATE documents SET {', '.join(sql_parts)} WHERE id=%s"
-            cur.execute(query, tuple(params))
+    sql_parts = ["name=%s"]
+    params = [name]
+    # Si se proporcionó una fecha (ya convertida), añadir al SET
+    if date_iso is not None:
+        sql_parts.append("date=%s")
+        params.append(date_iso)
+    # Si se subió un archivo, actualizar también el path
+    if new_object_key:
+        sql_parts.append("path=%s")
+        params.append(new_object_key)
+    
+    params.append(doc_id)
+    query = f"UPDATE documents SET {', '.join(sql_parts)} WHERE id=%s"
+    cur.execute(query, tuple(params))
 
             # 3. Actualizar los códigos (lógica sin cambios)
             if codigos is not None:
