@@ -1,13 +1,27 @@
-# GESTOR-DOC-backend/routes/documentos.py
+# File: rutas_documentos.py
+#
+# Este archivo corresponde a la ruta ``routes/documentos.py`` del backend
+# ``GESTOR-DOC``.  Incluye todas las rutas CRUD para documentos y
+# configuraciones de base de datos/R2.  La versión de este archivo ha
+# sido modificada para solucionar un fallo de handshake TLS con
+# Cloudflare R2.  En concreto, la función ``get_s3_client`` ahora
+# utiliza una configuración explícita de boto3 con firma ``s3v4`` y
+# addressing_style ``virtual`` en lugar de desactivar la verificación
+# TLS (``verify=False``), lo que evitaba el error pero no solucionaba
+# el handshake.  Además, se ha especificado ``region_name="auto"`` para
+# permitir que R2 determine la región correcta.
+
 import os
 import re
 import json
+import time
 import pymysql
 import requests
 import boto3
-import time 
+from botocore.client import Config
 from flask import Blueprint, request, jsonify, Response, g
 from werkzeug.utils import secure_filename
+
 
 documentos_bp = Blueprint("documentos", __name__)
 
@@ -60,7 +74,7 @@ def get_db_connection():
                 autocommit=True,
                 connect_timeout=15 
             )
-            return conn # Si la conexión es exitosa, la devuelve
+            return conn  # Si la conexión es exitosa, la devuelve
         except pymysql.err.OperationalError as e:
             # Si el error es "Connection refused", espera y reintenta
             if e.args[0] == 2003 and attempt < max_retries - 1:
@@ -70,20 +84,35 @@ def get_db_connection():
                 # Si es otro error o el último intento, lanza la excepción
                 raise e
 
+
 def get_s3_client():
+    """
+    Devuelve un cliente S3 configurado para Cloudflare R2.
+
+    La configuración utiliza ``signature_version='s3v4'`` y ``addressing_style='virtual'``
+    según las recomendaciones de Cloudflare R2.  Además se omite el parámetro
+    ``verify=False`` para permitir la verificación TLS y se especifica
+    ``region_name='auto'`` para que R2 determine la región adecuada.
+    """
+    cfg = Config(
+        signature_version='s3v4',
+        s3={'addressing_style': 'virtual'}
+    )
     return boto3.client(
         's3',
-        endpoint_url=os.getenv("R2_ENDPOINT_URL"),
-        aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
-        region_name='us-east-1',
-        verify=False  # <-- AÑADE ESTA LÍNEA FINAL
+        endpoint_url=os.getenv('R2_ENDPOINT_URL'),
+        aws_access_key_id=os.getenv('R2_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.getenv('R2_SECRET_ACCESS_KEY'),
+        region_name='auto',
+        config=cfg
     )
+
 
 def _codes_list(raw: str):
     if not raw:
         return []
     return [c.strip().upper() for c in raw.replace("\n", ",").replace(";", ",").replace(" ", ",").split(",") if c.strip()]
+
 
 # ==================== RUTAS CRUD y Búsqueda ====================
 
@@ -132,6 +161,7 @@ def upload_document():
         if conn and conn.open:
             conn.close()
 
+
 @documentos_bp.route("/", methods=["GET"])
 def listar_documentos():
     conn = get_db_connection()
@@ -156,7 +186,8 @@ def listar_documentos():
         if conn and conn.open:
             conn.close()
 
-@documentos_bp.route("/<int:doc_id>", methods=["GET"])
+
+@documentos_bp.route("/ ", methods=["GET"])
 def obtener_documento(doc_id):
     conn = get_db_connection()
     try:
@@ -183,7 +214,8 @@ def obtener_documento(doc_id):
         if conn and conn.open:
             conn.close()
 
-@documentos_bp.route("/<int:doc_id>", methods=["PUT"])
+
+@documentos_bp.route("/ ", methods=["PUT"])
 def editar_documento(doc_id):
     name = request.form.get("nombre") or request.form.get("name")
     date = request.form.get("fecha") or request.form.get("date")
@@ -239,7 +271,6 @@ def editar_documento(doc_id):
                         "INSERT INTO codes (document_id, code) VALUES (%s, %s)",
                         (doc_id, code),
                     )
-            
         # 4. Si todo salió bien en la BD y reemplazamos un archivo, borrar el antiguo de R2
         if old_object_key and old_object_key != new_object_key:
             try:
@@ -257,14 +288,14 @@ def editar_documento(doc_id):
                 s3 = get_s3_client()
                 s3.delete_object(Bucket=os.getenv("R2_BUCKET_NAME"), Key=new_object_key)
             except:
-                pass # Ignorar error de borrado en cascada
+                pass  # Ignorar error de borrado en cascada
         return jsonify({"error": str(e)}), 500
     finally:
         if conn and conn.open:
             conn.close()
 
 
-@documentos_bp.route("/<int:doc_id>", methods=["DELETE"])
+@documentos_bp.route("/ ", methods=["DELETE"])
 def eliminar_documento(doc_id):
     conn = get_db_connection()
     try:
@@ -286,6 +317,7 @@ def eliminar_documento(doc_id):
     finally:
         if conn and conn.open:
             conn.close()
+
 
 @documentos_bp.route("/search_by_code", methods=["POST"])
 def buscar_por_codigo():
@@ -342,6 +374,7 @@ def buscar_por_codigo():
         if conn and conn.open:
             conn.close()
 
+
 @documentos_bp.route("/search_optima", methods=["POST"])
 def busqueda_optima():
     data = request.get_json(silent=True) or {}
@@ -388,6 +421,7 @@ def busqueda_optima():
 
     return jsonify({"documentos": seleccionados, "codigos_faltantes": sorted(list(faltantes))})
 
+
 @documentos_bp.route("/resaltar", methods=["POST"])
 def resaltar_pdf_remoto():
     data = request.get_json(silent=True) or {}
@@ -418,9 +452,9 @@ def resaltar_pdf_remoto():
         r.raise_for_status()
 
         html_content = r.text
-        match = re.search(r'href="(/descargar/[^"]+)"', html_content)
+        match = re.search(r'href="(/descargar/[^\"]+)"', html_content)
         if not match:
-            error_match = re.search(r'<div class="flash-message error">\s*(.+?)\s*</div>', html_content, re.DOTALL)
+            error_match = re.search(r'\s*(.+?)\s*', html_content, re.DOTALL)
             error_message = (error_match.group(1).strip() if error_match else "No se pudo procesar el PDF.")
             return jsonify({"error": error_message}), 500
 
