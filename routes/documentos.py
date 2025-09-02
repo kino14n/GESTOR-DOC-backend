@@ -280,20 +280,20 @@ def editar_documento(doc_id):
                     old_object_key = result.get('path')
 
             # 2. Construir la consulta SQL dinámicamente
-    sql_parts = ["name=%s"]
-    params = [name]
-    # Si se proporcionó una fecha (ya convertida), añadir al SET
-    if date_iso is not None:
-        sql_parts.append("date=%s")
-        params.append(date_iso)
-    # Si se subió un archivo, actualizar también el path
-    if new_object_key:
-        sql_parts.append("path=%s")
-        params.append(new_object_key)
-    
-    params.append(doc_id)
-    query = f"UPDATE documents SET {', '.join(sql_parts)} WHERE id=%s"
-    cur.execute(query, tuple(params))
+            sql_parts = ["name=%s"]
+            params = [name]
+            # Si se proporcionó una fecha (ya convertida), añadir al SET
+            if date_iso is not None:
+                sql_parts.append("date=%s")
+                params.append(date_iso)
+            # Si se subió un archivo, actualizar también el path
+            if new_object_key:
+                sql_parts.append("path=%s")
+                params.append(new_object_key)
+
+            params.append(doc_id)
+            query = f"UPDATE documents SET {', '.join(sql_parts)} WHERE id=%s"
+            cur.execute(query, tuple(params))
 
             # 3. Actualizar los códigos (lógica sin cambios)
             if codigos is not None:
