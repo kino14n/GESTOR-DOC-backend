@@ -27,17 +27,25 @@ def create_app() -> Flask:
     # Registrar el blueprint que contiene todas nuestras rutas
     app.register_blueprint(documentos_bp, url_prefix="/api/documentos")
 
-@app.route("/api/diag")
-def diag():
-    """Ruta de diagnóstico para verificar la versión del código."""
-    import boto3 # Añade esta importación localmente
-    return jsonify({
-        "message": "Diagnóstico del backend.",
-        "codigo_version": "4.0-final-fix",
-        "boto3_version": boto3.__version__
-    })
+    @app.route("/api")
+    def index() -> jsonify:
+        """Ruta de diagnóstico para confirmar que la API se ejecuta."""
+        return jsonify({
+            "message": "API del Gestor de Documentos Multi-Cliente funcionando.",
+            "status": "ok",
+        })
 
-return app
+    @app.route("/api/diag")
+    def diag():
+        """Ruta de diagnóstico para verificar la versión del código."""
+        import boto3 # Añade esta importación localmente
+        return jsonify({
+            "message": "Diagnóstico del backend.",
+            "codigo_version": "4.0-final-fix",
+            "boto3_version": boto3.__version__
+        })
+
+    return app
 
 # Este bloque solo se ejecuta si corres el archivo directamente (ej. python app.py)
 if __name__ == "__main__":
